@@ -562,6 +562,22 @@ jobs:
           GO_METADATA: ${{ steps.go-oci.outputs.metadata }}
         run: |
           set -euo pipefail
+          # OCI exporters may put the tagged image index below the layout index.
+          oci_graph_has() {
+            local layout="$1" descriptor_file="$2" filter="$3"
+            local child_digest child
+            if jq -e "$filter" "$descriptor_file" >/dev/null; then
+              return 0
+            fi
+            while IFS= read -r child_digest; do
+              [[ "$child_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+              child="$layout/blobs/sha256/${child_digest#sha256:}"
+              if [ -f "$child" ] && oci_graph_has "$layout" "$child" "$filter"; then
+                return 0
+              fi
+            done < <(jq -r '.manifests[]?.digest // empty' "$descriptor_file")
+            return 1
+          }
           verify_oci() {
             local archive="$1" digest="$2" metadata="$3"
             local directory basename evidence
@@ -574,8 +590,8 @@ jobs:
             (cd "$(dirname "$archive")" && sha256sum "$basename" >"$basename.sha256")
             jq -e --arg digest "$digest" '."containerimage.digest" == $digest' "$evidence.metadata.json"
             tar -xf "$archive" -C "$directory"
-            jq -e '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))] | length == 2' "$directory/index.json"
-            jq -e 'any(.manifests[]; .annotations["vnd.docker.reference.type"] == "attestation-manifest")' "$directory/index.json"
+            oci_graph_has "$directory" "$directory/index.json" '[.manifests[]? | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | .platform.architecture] | sort == ["amd64", "arm64"]'
+            oci_graph_has "$directory" "$directory/index.json" 'any(.manifests[]?; .annotations["vnd.docker.reference.type"] == "attestation-manifest")'
             grep -R -a -q 'https://spdx.dev/Document' "$directory/blobs/sha256"
             grep -R -a -q 'https://slsa.dev/provenance/' "$directory/blobs/sha256"
           }
