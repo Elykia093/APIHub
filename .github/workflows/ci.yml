@@ -597,13 +597,23 @@ jobs:
           }
           verify_oci "/tmp/apihub-node-${GITHUB_SHA}.tar" "$NODE_DIGEST" "$NODE_METADATA"
           verify_oci "/tmp/apihub-go-${GITHUB_SHA}.tar" "$GO_DIGEST" "$GO_METADATA"
+      - name: Extract OCI layouts for Trivy
+        shell: bash
+        run: |
+          set -euo pipefail
+          for image in node go; do
+            layout="/tmp/apihub-${image}-${GITHUB_SHA}.layout"
+            mkdir -p "$layout"
+            tar -xf "/tmp/apihub-${image}-${GITHUB_SHA}.tar" -C "$layout"
+            test -f "$layout/index.json"
+          done
       - name: Scan final Node OCI for amd64
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
           TRIVY_PLATFORM: linux/amd64
         with:
           scan-type: image
-          input: /tmp/apihub-node-${{ github.sha }}.tar
+          input: /tmp/apihub-node-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
@@ -619,7 +629,7 @@ jobs:
           TRIVY_PLATFORM: linux/arm64
         with:
           scan-type: image
-          input: /tmp/apihub-node-${{ github.sha }}.tar
+          input: /tmp/apihub-node-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
@@ -636,7 +646,7 @@ jobs:
           TRIVY_PLATFORM: linux/amd64
         with:
           scan-type: image
-          input: /tmp/apihub-go-${{ github.sha }}.tar
+          input: /tmp/apihub-go-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
@@ -653,7 +663,7 @@ jobs:
           TRIVY_PLATFORM: linux/arm64
         with:
           scan-type: image
-          input: /tmp/apihub-go-${{ github.sha }}.tar
+          input: /tmp/apihub-go-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
