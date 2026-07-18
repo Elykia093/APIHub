@@ -8,6 +8,7 @@ data
 *.log
 androidApp
 .github
+.trivyignore.yaml
 web/node_modules
 web/test-results
 web/playwright-report
