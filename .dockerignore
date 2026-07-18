@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env*
+node_modules
+dist
+coverage
+data
+*.log
+androidApp
+.github
+web/node_modules
+web/test-results
+web/playwright-report
+server/coverage.out
+server/apihub
+server/apihub.exe

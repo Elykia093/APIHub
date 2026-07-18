@@ -1,0 +1,10 @@
+services:
+  apihub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: "${APIHUB_GO_IMAGE:-apihub-go:candidate}"
+    environment:
+      GOMEMLIMIT: "${GOMEMLIMIT:-96MiB}"
+    healthcheck:
+      test: ["CMD", "/apihub", "healthcheck"]

@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: apihub
+      POSTGRES_USER: apihub
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - apihub-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U apihub -d apihub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    stop_grace_period: 30s
+
+  apihub:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+    image: "${APIHUB_IMAGE:-apihub-node:local}"
+    restart: unless-stopped
+    init: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${PORT:-4180}:${PORT:-4180}"
+    environment:
+      NODE_ENV: "${NODE_ENV:-production}"
+      HOST: "${HOST:-0.0.0.0}"
+      PORT: "${PORT:-4180}"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:?ADMIN_TOKEN is required}"
+      APP_SECRET: "${APP_SECRET:?APP_SECRET is required}"
+      DATABASE_URL: "${DATABASE_URL:?DATABASE_URL is required}"
+      DATABASE_POOL_MAX: "${DATABASE_POOL_MAX:-5}"
+      DATABASE_IDLE_TIMEOUT_MS: "${DATABASE_IDLE_TIMEOUT_MS:-30000}"
+      DATABASE_CONNECTION_TIMEOUT_MS: "${DATABASE_CONNECTION_TIMEOUT_MS:-5000}"
+      DATABASE_STATEMENT_TIMEOUT_MS: "${DATABASE_STATEMENT_TIMEOUT_MS:-15000}"
+      HTTP_TIMEOUT_MS: "${HTTP_TIMEOUT_MS:-10000}"
+      MAX_RESPONSE_BYTES: "${MAX_RESPONSE_BYTES:-1048576}"
+      ALLOW_PRIVATE_SITES: "${ALLOW_PRIVATE_SITES:-false}"
+      ALLOW_INSECURE_HTTP: "${ALLOW_INSECURE_HTTP:-false}"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    mem_limit: 128m
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "const raw=process.env.HOST||'0.0.0.0';const h=raw==='0.0.0.0'?'127.0.0.1':raw==='::'?'::1':raw;const host=h.includes(':')?'['+h+']':h;const p=Number(process.env.PORT||4180);fetch('http://'+host+':'+p+'/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  apihub-postgres-data:

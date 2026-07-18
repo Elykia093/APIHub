@@ -1,0 +1,658 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  node-baseline:
+    name: Node compatibility baseline
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - run: npm ci
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run build
+      - run: node --test tests/dist-runtime-smoke.mjs
+
+  web:
+    name: Vue lint, test, build and E2E
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run lint
+      - run: npm test
+      - run: npm run build
+      - name: Verify committed embedded assets are current
+        run: |
+          git diff --exit-code -- ../server/internal/webui/dist
+          test -z "$(git status --porcelain --untracked-files=all -- ../server/internal/webui/dist)"
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+      - name: Upload E2E evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: playwright-report-${{ github.sha }}-${{ github.run_attempt }}
+          path: web/playwright-report
+          retention-days: 7
+
+  go:
+    name: Go test, race, vet, lint and vulnerability scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: server/go.sum
+      - run: go test -count=1 ./...
+      - run: go test -race -count=1 ./...
+      - run: go vet ./...
+      - name: golangci-lint
+        run: go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.4.0 run ./...
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  postgres:
+    name: PostgreSQL 17 integration
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: apihub_test
+          POSTGRES_USER: apihub
+          POSTGRES_PASSWORD: integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U apihub -d apihub_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      APIHUB_INTEGRATION_DATABASE_URL: postgresql://apihub:integration-password@127.0.0.1:5432/apihub_test
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version: 1.26.5
+          cache-dependency-path: server/go.sum
+      - run: go test -tags=integration -count=1 -v ./internal/service
+
+  android-unit:
+    name: Android unit, lint and release/R8
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: androidApp
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      - name: Install Android compile SDK
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+      - run: ./gradlew testDebugUnitTest lintDebug assembleRelease --stacktrace
+      - name: Upload release APK
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: android-release-unsigned-${{ github.sha }}-${{ github.run_attempt }}
+          path: androidApp/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+          retention-days: 7
+
+  android-instrumented:
+    name: Android UI and Keystore (API ${{ matrix.api-level }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        api-level: [26, 35, 36]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00 # v4.7.1
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      - name: Install Android compile SDK
+        run: sdkmanager "platforms;android-37.0" "build-tools;37.0.0"
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Run device tests
+        uses: reactivecircus/android-emulator-runner@1dcd0090116d15e7c562f8db72807de5e036a4ed # v2.34.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          arch: x86_64
+          profile: pixel_7
+          disable-animations: true
+          working-directory: androidApp
+          script: ./gradlew connectedDebugAndroidTest --stacktrace
+
+  container:
+    name: Node rollback and Go candidate compatibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    needs: [node-baseline, web, go, postgres, android-unit, android-instrumented]
+    env:
+      DATABASE_POOL_MAX: "7"
+      DATABASE_IDLE_TIMEOUT_MS: "31000"
+      DATABASE_CONNECTION_TIMEOUT_MS: "6000"
+      DATABASE_STATEMENT_TIMEOUT_MS: "16000"
+      HTTP_TIMEOUT_MS: "12000"
+      MAX_RESPONSE_BYTES: "2097152"
+      ALLOW_PRIVATE_SITES: "false"
+      ALLOW_INSECURE_HTTP: "false"
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Create ephemeral smoke credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          admin_token="$(openssl rand -hex 24)"
+          app_secret="$(openssl rand -hex 32)"
+          postgres_password="$(openssl rand -hex 16):/?#%"
+          encoded_password="$(PASSWORD="$postgres_password" node -e "process.stdout.write(encodeURIComponent(process.env.PASSWORD))")"
+          {
+            echo "ADMIN_TOKEN=$admin_token"
+            echo "APP_SECRET=$app_secret"
+            echo "POSTGRES_PASSWORD=$postgres_password"
+            echo "DATABASE_URL=postgresql://apihub:$encoded_password@postgres:5432/apihub"
+          } >>"$GITHUB_ENV"
+      - name: Run Node rollback and Go candidate against one contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=(docker compose)
+          candidate=(docker compose -f docker-compose.yml -f docker-compose.go.yml)
+
+          wait_ready() {
+            for attempt in $(seq 1 45); do
+              if curl --fail --silent http://127.0.0.1:4180/health/ready >/dev/null; then return 0; fi
+              if [ "$attempt" = 45 ]; then "${candidate[@]}" logs; return 1; fi
+              sleep 2
+            done
+          }
+
+          verify_hardening() {
+            local container="$1" expected_user="$2"
+            test "$(docker inspect --format '{{.Config.User}}' "$container")" = "$expected_user"
+            test "$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}' "$container")" = "true"
+            test "$(docker inspect --format '{{.HostConfig.Memory}}' "$container")" = "134217728"
+            test "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "$container")" = "128"
+            test -n "$(docker inspect --format '{{index .HostConfig.Tmpfs "/tmp"}}' "$container")"
+            test "$(docker inspect --format '{{json .HostConfig.CapDrop}}' "$container")" = '["ALL"]'
+            docker inspect --format '{{json .HostConfig.SecurityOpt}}' "$container" | grep -q 'no-new-privileges'
+          }
+
+          verify_forwarded_environment() {
+            local container="$1"
+            local actual
+            actual="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$container")"
+            for expected in \
+              'DATABASE_POOL_MAX=7' \
+              'DATABASE_IDLE_TIMEOUT_MS=31000' \
+              'DATABASE_CONNECTION_TIMEOUT_MS=6000' \
+              'DATABASE_STATEMENT_TIMEOUT_MS=16000' \
+              'HTTP_TIMEOUT_MS=12000' \
+              'MAX_RESPONSE_BYTES=2097152' \
+              'ALLOW_PRIVATE_SITES=false' \
+              'ALLOW_INSECURE_HTTP=false'; do
+              grep -Fqx "$expected" <<<"$actual"
+            done
+          }
+
+          snapshot_contract() {
+            SNAPSHOT_PATH="$1" node --input-type=module <<'NODE'
+          const sortValue = value => {
+            if (Array.isArray(value)) return value.map(sortValue);
+            if (value && typeof value === 'object') {
+              return Object.fromEntries(Object.keys(value).sort().map(key => [key, sortValue(value[key])]));
+            }
+            return value;
+          };
+          const cases = [
+            { label: 'live', path: '/health/live' },
+            { label: 'ready', path: '/health/ready' },
+            { label: 'unauthorized-sites', path: '/api/v1/sites' },
+            { label: 'summary', path: '/api/v1/summary', auth: true },
+            { label: 'adapters', path: '/api/v1/site-adapters', auth: true },
+            { label: 'sites', path: '/api/v1/sites', auth: true },
+            { label: 'checkins', path: '/api/v1/checkin-runs?limit=1', auth: true },
+            { label: 'unknown-api', path: '/api/v1/not-a-route', auth: true },
+            { label: 'trailing-site-path', path: '/api/v1/sites/', auth: true },
+          ];
+          const snapshot = [];
+          for (const item of cases) {
+            const headers = item.auth ? { Authorization: `Bearer ${process.env.ADMIN_TOKEN}` } : {};
+            const response = await fetch(`http://127.0.0.1:4180${item.path}`, { headers });
+            const text = await response.text();
+            let body = text;
+            try {
+              body = JSON.parse(text);
+              if (body?.error?.requestId) body.error.requestId = '<request-id>';
+              body = sortValue(body);
+            } catch {}
+            snapshot.push({
+              label: item.label,
+              status: response.status,
+              contentType: response.headers.get('content-type')?.split(';', 1)[0] ?? null,
+              cacheControl: response.headers.get('cache-control'),
+              body,
+            });
+          }
+          await import('node:fs/promises').then(fs => fs.writeFile(process.env.SNAPSHOT_PATH, `${JSON.stringify(snapshot, null, 2)}\n`));
+          NODE
+          }
+
+          "${base[@]}" up -d --build
+          wait_ready
+          node_container="$("${base[@]}" ps -q apihub)"
+          verify_hardening "$node_container" node
+          verify_forwarded_environment "$node_container"
+          node_healthcheck="$(docker inspect --format '{{json .Config.Healthcheck.Test}}' "$node_container")"
+          grep -Fq 'Number(process.env.PORT' <<<"$node_healthcheck"
+          grep -Fq "raw==='::'?'::1'" <<<"$node_healthcheck"
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          const target = (host, port) => {
+            const selected = host === '0.0.0.0' ? '127.0.0.1' : host === '::' ? '::1' : host;
+            const authority = selected.includes(':') ? `[${selected}]` : selected;
+            return `http://${authority}:${Number(port || 4180)}/health/ready`;
+          };
+          assert.equal(target('0.0.0.0', '1e3'), 'http://127.0.0.1:1000/health/ready');
+          assert.equal(target('127.0.0.1', '4180.0'), 'http://127.0.0.1:4180/health/ready');
+          assert.equal(target('::', '4180'), 'http://[::1]:4180/health/ready');
+          assert.equal(target('::1', '4180'), 'http://[::1]:4180/health/ready');
+          NODE
+          compose_network="$(docker inspect --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{end}}' "$node_container")"
+          test -n "$compose_network"
+          docker run -d --rm --name apihub-contract-upstream --network "$compose_network" node:24-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd \
+            node -e "require('node:http').createServer((request,response)=>{let body='';request.on('data',chunk=>body+=chunk);request.on('end',()=>{console.log(JSON.stringify({method:request.method,path:request.url,authorization:request.headers.authorization??null,body}));response.writeHead(200,{'content-type':'application/json'});response.end(JSON.stringify({success:true,message:'checked',data:{}}))})}).listen(8080,'0.0.0.0')"
+          stateful_site_payload="$(jq -nc '{name:"CI stateful compatibility",baseUrl:"https://example.com",adapter:"zen-api",userId:"",accessToken:"node-token with spaces",enabled:true,checkinEnabled:true,announcementEnabled:false,checkinCron:"15 8 * * *",announcementCron:"*/30 * * * *",timezone:"asia/shanghai"}')"
+          stateful_site="$(curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
+            --data "$stateful_site_payload" http://127.0.0.1:4180/api/v1/sites)"
+          stateful_site_id="$(jq -er '.data.id' <<<"$stateful_site")"
+          test "$(jq -r '.data.timezone' <<<"$stateful_site")" = 'asia/shanghai'
+          snapshot_contract /tmp/node-contract.json
+          schema_state="$("${base[@]}" exec -T postgres psql -U apihub -d apihub -Atqc "SELECT string_agg(version::text || ':' || checksum, ',' ORDER BY version) FROM schema_migrations")"
+          test -n "$schema_state"
+          "${base[@]}" stop -t 30 apihub
+          node_exit="$(docker inspect --format '{{.State.ExitCode}}' "$node_container")"
+          test "$node_exit" = "0"
+          test "$node_exit" != "137"
+          "${base[@]}" logs --no-color apihub | grep -q 'shutting down'
+
+          "${candidate[@]}" up -d --build --force-recreate apihub
+          wait_ready
+          app_container="$("${candidate[@]}" ps -q apihub)"
+          verify_hardening "$app_container" nonroot:nonroot
+          verify_forwarded_environment "$app_container"
+          docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$app_container" | grep -qx 'GOMEMLIMIT=96MiB'
+          snapshot_contract /tmp/go-contract.json
+          diff -u /tmp/node-contract.json /tmp/go-contract.json
+          test "$("${candidate[@]}" exec -T postgres psql -U apihub -d apihub -Atqc "SELECT string_agg(version::text || ':' || checksum, ',' ORDER BY version) FROM schema_migrations")" = "$schema_state"
+
+          "${candidate[@]}" stop -t 30 apihub
+          default_go_exit="$(docker inspect --format '{{.State.ExitCode}}' "$app_container")"
+          test "$default_go_exit" = "0"
+          export ALLOW_PRIVATE_SITES=true
+          export ALLOW_INSECURE_HTTP=true
+          "${candidate[@]}" up -d --force-recreate apihub
+          wait_ready
+          app_container="$("${candidate[@]}" ps -q apihub)"
+
+          curl --fail --silent --show-error -X PATCH \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
+            --data '{"baseUrl":"http://apihub-contract-upstream:8080"}' \
+            "http://127.0.0.1:4180/api/v1/sites/${stateful_site_id}" >/tmp/go-stateful-patch.json
+          curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+            "http://127.0.0.1:4180/api/v1/sites/${stateful_site_id}/checkin-runs" >/tmp/go-stateful-checkin.json
+          test "$(jq -r '.data.status' /tmp/go-stateful-checkin.json)" = 'success'
+          docker logs apihub-contract-upstream | grep -Fq '"authorization":"Bearer node-token with spaces"'
+          curl --fail --silent --show-error -X PATCH \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}" -H 'Content-Type: application/json' \
+            --data '{"accessToken":"go-token with spaces"}' \
+            "http://127.0.0.1:4180/api/v1/sites/${stateful_site_id}" >/tmp/go-token-patch.json
+
+          "${candidate[@]}" stop -t 30 apihub
+          go_stateful_exit="$(docker inspect --format '{{.State.ExitCode}}' "$app_container")"
+          test "$go_stateful_exit" = "0"
+          "${base[@]}" up -d --force-recreate apihub
+          wait_ready
+          rollback_container="$("${base[@]}" ps -q apihub)"
+          "${base[@]}" exec -T postgres psql -U apihub -d apihub -v ON_ERROR_STOP=1 -c \
+            "DELETE FROM checkin_runs WHERE site_id = '${stateful_site_id}'" >/dev/null
+          curl --fail --silent --show-error -X POST \
+            -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+            "http://127.0.0.1:4180/api/v1/sites/${stateful_site_id}/checkin-runs" >/tmp/node-rollback-checkin.json
+          test "$(jq -r '.data.status' /tmp/node-rollback-checkin.json)" = 'success'
+          docker logs apihub-contract-upstream | grep -Fq '"authorization":"Bearer go-token with spaces"'
+          docker logs apihub-contract-upstream | sed -E 's/Bearer [^"]+/Bearer <redacted>/g' >/tmp/stateful-upstream.log
+          "${base[@]}" stop -t 30 apihub
+          rollback_exit="$(docker inspect --format '{{.State.ExitCode}}' "$rollback_container")"
+          test "$rollback_exit" = "0"
+
+          "${candidate[@]}" up -d --force-recreate apihub
+          wait_ready
+          app_container="$("${candidate[@]}" ps -q apihub)"
+
+          "${candidate[@]}" up -d --force-recreate postgres
+          for attempt in $(seq 1 30); do
+            if "${candidate[@]}" exec -T postgres pg_isready -U apihub -d apihub >/dev/null; then break; fi
+            if [ "$attempt" = 30 ]; then "${candidate[@]}" logs postgres; exit 1; fi
+            sleep 2
+          done
+          test "$("${candidate[@]}" exec -T postgres psql -U apihub -d apihub -Atqc "SELECT string_agg(version::text || ':' || checksum, ',' ORDER BY version) FROM schema_migrations")" = "$schema_state"
+          wait_ready
+
+          seq 1 60 | xargs -P16 -I{} curl --fail --silent -H "Authorization: Bearer ${ADMIN_TOKEN}" http://127.0.0.1:4180/api/v1/summary >/dev/null
+          seq 1 60 | xargs -P16 -I{} curl --fail --silent http://127.0.0.1:4180/health/ready >/dev/null
+          seq 1 60 | xargs -P16 -I{} curl --fail --silent http://127.0.0.1:4180/ >/dev/null
+          test "$(docker inspect --format '{{.State.OOMKilled}}' "$app_container")" = "false"
+
+          "${candidate[@]}" stop -t 30 apihub
+          go_exit="$(docker inspect --format '{{.State.ExitCode}}' "$app_container")"
+          test "$go_exit" = "0"
+          test "$go_exit" != "137"
+          test "$(docker inspect --format '{{.State.OOMKilled}}' "$app_container")" = "false"
+          "${candidate[@]}" logs --no-color apihub | grep -q 'shutting down'
+          ! "${candidate[@]}" logs --no-color apihub | grep -q 'shutdown failed'
+      - name: Upload Node and Go contract snapshots
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: node-go-contract-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            /tmp/node-contract.json
+            /tmp/go-contract.json
+            /tmp/go-stateful-patch.json
+            /tmp/go-stateful-checkin.json
+            /tmp/go-token-patch.json
+            /tmp/node-rollback-checkin.json
+            /tmp/stateful-upstream.log
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Scan repository dependencies and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          version: v0.70.0
+          format: json
+          output: /tmp/trivy-filesystem.json
+      - name: Scan Node rollback image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: apihub-node:local
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/trivy-node-image.json
+      - name: Scan Go candidate image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: apihub-go:candidate
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/trivy-go-image.json
+      - name: Scan PostgreSQL runtime image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/trivy-postgres-image.json
+      - name: Enforce security scan gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for report in /tmp/trivy-filesystem.json /tmp/trivy-node-image.json /tmp/trivy-go-image.json /tmp/trivy-postgres-image.json; do
+            test -s "$report"
+            jq -e '([.Results[]?.Vulnerabilities[]?] + [.Results[]?.Secrets[]?]) | length == 0' "$report"
+          done
+      - name: Upload security scan evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: trivy-security-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/trivy-*.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Stop smoke environment
+        if: always()
+        shell: bash
+        run: |
+          export ADMIN_TOKEN="${ADMIN_TOKEN:-cleanup-admin-token-123456}"
+          export APP_SECRET="${APP_SECRET:-cleanup-app-secret-with-at-least-32-characters}"
+          export POSTGRES_PASSWORD="${POSTGRES_PASSWORD:-cleanup-password}"
+          export DATABASE_URL="${DATABASE_URL:-postgresql://apihub:cleanup-password@postgres:5432/apihub}"
+          docker rm -f apihub-contract-upstream 2>/dev/null || true
+          docker compose -f docker-compose.yml -f docker-compose.go.yml down -v --remove-orphans
+
+  supply-chain:
+    name: Immutable multi-architecture OCI evidence
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    needs: [container]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Build Node rollback OCI
+        id: node-oci
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.node
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: apihub-node:rollback-${{ github.sha }}
+          outputs: type=oci,dest=/tmp/apihub-node-${{ github.sha }}.tar
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            VERSION=ci-${{ github.run_number }}
+            REVISION=${{ github.sha }}
+      - name: Build Go candidate OCI
+        id: go-oci
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: false
+          tags: apihub-go:candidate-${{ github.sha }}
+          outputs: type=oci,dest=/tmp/apihub-go-${{ github.sha }}.tar
+          sbom: true
+          provenance: mode=max
+          build-args: |
+            VERSION=ci-${{ github.run_number }}
+            REVISION=${{ github.sha }}
+      - name: Verify OCI indexes, attestations, digests and checksums
+        shell: bash
+        env:
+          NODE_DIGEST: ${{ steps.node-oci.outputs.digest }}
+          NODE_METADATA: ${{ steps.node-oci.outputs.metadata }}
+          GO_DIGEST: ${{ steps.go-oci.outputs.digest }}
+          GO_METADATA: ${{ steps.go-oci.outputs.metadata }}
+        run: |
+          set -euo pipefail
+          verify_oci() {
+            local archive="$1" digest="$2" metadata="$3"
+            local directory basename evidence
+            directory="$(mktemp -d)"
+            basename="$(basename "$archive")"
+            evidence="${archive%.tar}"
+            test -n "$digest"
+            printf '%s\n' "$digest" >"$evidence.digest"
+            printf '%s\n' "$metadata" >"$evidence.metadata.json"
+            (cd "$(dirname "$archive")" && sha256sum "$basename" >"$basename.sha256")
+            jq -e --arg digest "$digest" '."containerimage.digest" == $digest' "$evidence.metadata.json"
+            tar -xf "$archive" -C "$directory"
+            jq -e '[.manifests[] | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))] | length == 2' "$directory/index.json"
+            jq -e 'any(.manifests[]; .annotations["vnd.docker.reference.type"] == "attestation-manifest")' "$directory/index.json"
+            grep -R -a -q 'https://spdx.dev/Document' "$directory/blobs/sha256"
+            grep -R -a -q 'https://slsa.dev/provenance/' "$directory/blobs/sha256"
+          }
+          verify_oci "/tmp/apihub-node-${GITHUB_SHA}.tar" "$NODE_DIGEST" "$NODE_METADATA"
+          verify_oci "/tmp/apihub-go-${GITHUB_SHA}.tar" "$GO_DIGEST" "$GO_METADATA"
+      - name: Scan final Node OCI for amd64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          scan-type: image
+          input: /tmp/apihub-node-${{ github.sha }}.tar
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          version: v0.70.0
+          format: json
+          output: /tmp/apihub-node-${{ github.sha }}.trivy.amd64.json
+      - name: Scan final Node OCI for arm64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          scan-type: image
+          input: /tmp/apihub-node-${{ github.sha }}.tar
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/apihub-node-${{ github.sha }}.trivy.arm64.json
+      - name: Scan final Go OCI for amd64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          scan-type: image
+          input: /tmp/apihub-go-${{ github.sha }}.tar
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/apihub-go-${{ github.sha }}.trivy.amd64.json
+      - name: Scan final Go OCI for arm64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          scan-type: image
+          input: /tmp/apihub-go-${{ github.sha }}.tar
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: 0
+          timeout: 10m
+          skip-setup-trivy: true
+          cache: false
+          format: json
+          output: /tmp/apihub-go-${{ github.sha }}.trivy.arm64.json
+      - name: Enforce final OCI scan gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          for report in /tmp/apihub-{node,go}-${GITHUB_SHA}.trivy.{amd64,arm64}.json; do
+            test -s "$report"
+            jq -e '([.Results[]?.Vulnerabilities[]?] + [.Results[]?.Secrets[]?]) | length == 0' "$report"
+          done
+      - name: Upload immutable Node rollback OCI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apihub-node-rollback-oci-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/apihub-node-${{ github.sha }}.*
+          if-no-files-found: error
+          retention-days: 30
+      - name: Upload immutable Go candidate OCI
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apihub-go-candidate-oci-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/apihub-go-${{ github.sha }}.*
+          if-no-files-found: error
+          retention-days: 30
