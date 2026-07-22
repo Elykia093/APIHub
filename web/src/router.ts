@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/sites/:id/edit', name: 'site-edit', component: () => import('./views/SiteEditorView.vue') },
     { path: '/checkins', name: 'checkins', component: () => import('./views/CheckinsView.vue') },
     { path: '/announcements', name: 'announcements', component: () => import('./views/AnnouncementsView.vue') },
+    { path: '/companions', name: 'companions', component: () => import('./views/CompanionView.vue') },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 });

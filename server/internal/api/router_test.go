@@ -106,6 +106,24 @@ func TestUnauthorizedRequestsDoNotConsumeGlobalRateLimit(t *testing.T) {
 	}
 }
 
+func TestCompanionRequestsUseGlobalRateLimitAndNoStore(t *testing.T) {
+	router := testRouter(t)
+	for attempt := 1; attempt <= 241; attempt++ {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/companion/tasks/claims", nil))
+		if got := response.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("attempt %d Cache-Control = %q, want no-store", attempt, got)
+		}
+		want := http.StatusUnauthorized
+		if attempt == 241 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, response.Code, want, response.Body.String())
+		}
+	}
+}
+
 func TestCreateRejectsExplicitEmptyDefaultedFields(t *testing.T) {
 	router := testRouter(t)
 	base := map[string]any{

@@ -119,6 +119,17 @@
 
 签到任务执行错误会先落库，再随 `CheckinRun` 返回；`errorCode` 可能为 `UPSTREAM_TIMEOUT`、`UPSTREAM_REJECTED`、`UPSTREAM_RESPONSE_TOO_LARGE`、`UPSTREAM_REDIRECT_BLOCKED`、`SITE_URL_BLOCKED` 或 `INTERNAL_ERROR`。验证码、Turnstile 或二次验证使用 `status: manual_required` 与 `errorCode: MANUAL_ACTION_REQUIRED`，不是顶层 HTTP 409。
 
+## 浏览器伴侣
+
+- 管理端 `POST /api/v1/companion-pairing-codes` 创建五分钟、单次使用的配对码。
+- 管理端 `GET /api/v1/companion-devices` 列设备；`POST /api/v1/companion-devices/{deviceId}/revocations` 撤销设备。
+- 管理端 `POST /api/v1/sites/{siteId}/browser-tasks` 创建浏览器任务，请求 `{ "targetUrl": string }`；URL origin 必须与站点 `baseUrl` 完全一致。同一站点已有 `queued` 或 `leased` 任务时返回 `409 CONFLICT`。
+- 管理端 `GET /api/v1/browser-tasks?limit=50` 查询任务。
+- 伴侣端 `POST /api/v1/companion/pairings` 消费配对码并仅返回一次设备令牌。
+- 伴侣端领取、续租和回传分别使用 `/api/v1/companion/tasks/claims`、`/{taskId}/heartbeats` 与 `/{taskId}/results`。
+
+任务状态为 `queued -> leased -> success | already_checked | manual_required | failed`。领取带两分钟租约，心跳续租，过期后可重新领取；终态结果回传幂等。设备令牌、配对码、租约令牌在数据库只保存 SHA-256 摘要。任务和响应不包含站点访问令牌、用户 ID、Cookie、LocalStorage、OAuth code 或验证码。详细请求、错误和回滚约束见 `docs/browser-companion.md`。
+
 ## 性能与可靠性预算
 
 - JSON body 上限 64 KiB；列表最大 100 条。
@@ -134,3 +145,4 @@
 - 调度可通过停用站点或关闭对应功能立即停止，不删除历史记录。
 - 本次新增的 `capabilities` 响应字段与可选创建字段保持旧 New API 客户端兼容；旧客户端不传 `adapter` 时仍按 `new-api` 创建。
 - 数据库 v2 迁移只扩展 `sites.adapter` 的允许值，不修改 v1 SQL 或校验和；回滚到旧版本前必须确保库中不存在非 `new-api` 站点，否则旧代码无法解释新枚举。
+- 数据库 v3 只新增浏览器伴侣表和索引，不修改 v1/v2 SQL 或校验和；旧构建不认识 v3 时会拒绝启动，回滚必须使用包含 v3 定义的兼容构建。

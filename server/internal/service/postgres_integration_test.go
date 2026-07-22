@@ -30,7 +30,7 @@ import (
 )
 
 func TestPostgresMigrations(t *testing.T) {
-	t.Run("empty database installs v1 and v2", func(t *testing.T) {
+	t.Run("empty database installs v1 through v3", func(t *testing.T) {
 		db, _ := integrationSchema(t)
 		if err := migrate.Run(context.Background(), db); err != nil {
 			t.Fatal(err)
@@ -39,12 +39,21 @@ func TestPostgresMigrations(t *testing.T) {
 		if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 2 {
-			t.Fatalf("migration count = %d, want 2", count)
+		if count != 3 {
+			t.Fatalf("migration count = %d, want 3", count)
+		}
+		for _, table := range []string{"companion_pairing_codes", "companion_devices", "browser_tasks"} {
+			var relation sql.NullString
+			if err := db.QueryRow("SELECT to_regclass($1)", table).Scan(&relation); err != nil {
+				t.Fatal(err)
+			}
+			if !relation.Valid {
+				t.Fatalf("migration v3 table %s is missing", table)
+			}
 		}
 	})
 
-	t.Run("v1 database upgrades to v2", func(t *testing.T) {
+	t.Run("v1 database upgrades through v3", func(t *testing.T) {
 		db, _ := integrationSchema(t)
 		migrations := migrate.All()
 		if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum VARCHAR(64) NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
@@ -59,8 +68,16 @@ func TestPostgresMigrations(t *testing.T) {
 		if err := migrate.Run(context.Background(), db); err != nil {
 			t.Fatal(err)
 		}
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil || count != 3 {
+			t.Fatalf("migration count after v1 upgrade = %d, err=%v; want 3", count, err)
+		}
 		if _, err := db.Exec(`INSERT INTO sites(id, name, base_url, adapter, user_id, access_token_ciphertext, checkin_cron, announcement_cron, timezone, created_at, updated_at) VALUES($1, 'sub2', 'https://sub2.example', 'sub2api', '', 'cipher', '15 8 * * *', '*/30 * * * *', 'UTC', NOW(), NOW())`, uuid.NewString()); err != nil {
-			t.Fatalf("v2 adapter constraint not active: %v", err)
+			t.Fatalf("v2 adapter constraint is not active: %v", err)
+		}
+		var relation sql.NullString
+		if err := db.QueryRow("SELECT to_regclass('browser_tasks')").Scan(&relation); err != nil || !relation.Valid {
+			t.Fatalf("v3 browser_tasks table is missing after v1 upgrade: %v", err)
 		}
 	})
 
@@ -78,6 +95,217 @@ func TestPostgresMigrations(t *testing.T) {
 		}
 	})
 }
+
+func TestPostgresCompanionConcurrentClaims(t *testing.T) {
+	db, _ := integrationSchema(t)
+	if err := migrate.Run(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	siteIDs := []string{uuid.NewString(), uuid.NewString()}
+	for index, siteID := range siteIDs {
+		if _, err := db.Exec(`INSERT INTO sites(id, name, base_url, adapter, user_id, access_token_ciphertext, checkin_cron, announcement_cron, timezone, created_at, updated_at) VALUES($1, $2, $3, 'new-api', '1', 'cipher', '15 8 * * *', '*/30 * * * *', 'UTC', $4, $4)`, siteID, fmt.Sprintf("companion-%d", index+1), fmt.Sprintf("https://companion-%d.example", index+1), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	deviceIDs := []string{uuid.NewString(), uuid.NewString()}
+	for index, deviceID := range deviceIDs {
+		if _, err := db.Exec(`INSERT INTO companion_devices(id, name, token_hash, created_at) VALUES($1, $2, $3, $4)`, deviceID, fmt.Sprintf("device-%d", index+1), secretHash(fmt.Sprintf("token-%d", index+1)), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for index := range deviceIDs {
+		if _, err := db.Exec(`INSERT INTO browser_tasks(id, site_id, target_url, status, created_at) VALUES($1, $2, $3, 'queued', $4)`, uuid.NewString(), siteIDs[index], fmt.Sprintf("https://companion-%d.example/task", index+1), now.Add(time.Duration(index)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := db.Exec(`
+      CREATE FUNCTION delay_browser_task_lease() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF OLD.status = 'queued' AND NEW.status = 'leased' THEN
+          PERFORM pg_sleep(0.2);
+        END IF;
+        RETURN NEW;
+      END
+      $$
+    `); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+      CREATE TRIGGER delay_browser_task_lease
+      BEFORE UPDATE ON browser_tasks
+      FOR EACH ROW EXECUTE FUNCTION delay_browser_task_lease()
+    `); err != nil {
+		t.Fatal(err)
+	}
+
+	type claimResult struct {
+		claim *ClaimedBrowserTask
+		err   error
+	}
+	service := NewCompanionService(db)
+	start := make(chan struct{})
+	results := make(chan claimResult, len(deviceIDs))
+	for _, deviceID := range deviceIDs {
+		go func(id string) {
+			<-start
+			claim, err := service.Claim(context.Background(), id)
+			results <- claimResult{claim: claim, err: err}
+		}(deviceID)
+	}
+	close(start)
+
+	claimedIDs := map[string]bool{}
+	for range deviceIDs {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			if result.claim == nil {
+				t.Fatal("concurrent claim returned no task while another queued task existed")
+			}
+			if claimedIDs[result.claim.Task.ID] {
+				t.Fatalf("task %s was claimed twice", result.claim.Task.ID)
+			}
+			claimedIDs[result.claim.Task.ID] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent companion claims timed out")
+		}
+	}
+}
+
+func TestPostgresCompanionLifecycle(t *testing.T) {
+	db, _ := integrationSchema(t)
+	if err := migrate.Run(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	siteID := uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO sites(id, name, base_url, adapter, user_id, access_token_ciphertext, checkin_cron, announcement_cron, timezone, created_at, updated_at) VALUES($1, 'companion-lifecycle', 'https://lifecycle.example', 'new-api', '1', 'cipher', '15 8 * * *', '*/30 * * * *', 'UTC', $2, $2)`, siteID, now); err != nil {
+		t.Fatal(err)
+	}
+
+	companion := NewCompanionService(db)
+	pair := func(name string) (CompanionDevice, string) {
+		t.Helper()
+		code, _, err := companion.CreatePairingCode(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		device, token, err := companion.Pair(context.Background(), code, name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return device, token
+	}
+
+	firstCode, _, err := companion.CreatePairingCode(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, firstToken, err := companion.Pair(context.Background(), firstCode, "Chrome 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := companion.Pair(context.Background(), firstCode, "Chrome duplicate"); apperror.As(err).Code != apperror.AuthRequired {
+		t.Fatalf("reused pairing code error = %v, want %s", err, apperror.AuthRequired)
+	}
+	expiredCode := "EXPIRED-COMPANION-CODE"
+	if _, err := db.Exec(`INSERT INTO companion_pairing_codes(id, code_hash, expires_at, created_at) VALUES($1, $2, $3, $4)`, uuid.NewString(), secretHash(expiredCode), now.Add(-time.Minute), now.Add(-2*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := companion.Pair(context.Background(), expiredCode, "Chrome expired"); apperror.As(err).Code != apperror.AuthRequired {
+		t.Fatalf("expired pairing code error = %v, want %s", err, apperror.AuthRequired)
+	}
+	if authenticated, err := companion.Authenticate(context.Background(), firstToken); err != nil || authenticated.ID != first.ID {
+		t.Fatalf("authenticate paired device = %+v, err=%v", authenticated, err)
+	}
+
+	second, _ := pair("Chrome 2")
+	third, _ := pair("Chrome 3")
+
+	task, err := companion.CreateTask(context.Background(), siteID, " HTTPS://LIFECYCLE.EXAMPLE:443/console#fragment ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.TargetURL != "https://lifecycle.example/console" {
+		t.Fatalf("normalized task target = %q", task.TargetURL)
+	}
+	if _, err := companion.CreateTask(context.Background(), siteID, "https://lifecycle.example/duplicate"); apperror.As(err).Code != apperror.Conflict {
+		t.Fatalf("duplicate active task error = %v, want %s", err, apperror.Conflict)
+	}
+	if _, err := companion.CreateTask(context.Background(), siteID, "https://other.example/console"); apperror.As(err).Code != apperror.ValidationError {
+		t.Fatalf("cross-origin task error = %v, want %s", err, apperror.ValidationError)
+	}
+
+	firstClaim, err := companion.Claim(context.Background(), first.ID)
+	if err != nil || firstClaim == nil || firstClaim.Task.ID != task.ID {
+		t.Fatalf("first claim = %+v, err=%v", firstClaim, err)
+	}
+	if _, err := companion.Heartbeat(context.Background(), second.ID, task.ID, firstClaim.LeaseToken); apperror.As(err).Code != apperror.Conflict {
+		t.Fatalf("cross-device heartbeat error = %v, want %s", err, apperror.Conflict)
+	}
+	if _, err := companion.Finish(context.Background(), second.ID, task.ID, firstClaim.LeaseToken, "failed", "cross-device", nil); apperror.As(err).Code != apperror.Conflict {
+		t.Fatalf("cross-device result error = %v, want %s", err, apperror.Conflict)
+	}
+	finished, err := companion.Finish(context.Background(), first.ID, task.ID, firstClaim.LeaseToken, "success", "done", stringPtr("12.34"))
+	if err != nil || finished.Status != "success" || finished.Balance == nil || *finished.Balance != "12.34" {
+		t.Fatalf("finished task = %+v, err=%v", finished, err)
+	}
+	replayed, err := companion.Finish(context.Background(), first.ID, task.ID, firstClaim.LeaseToken, "failed", "replacement", stringPtr("0"))
+	if err != nil || replayed.Status != "success" || replayed.Message != "done" || replayed.Balance == nil || *replayed.Balance != "12.34" {
+		t.Fatalf("idempotent replay = %+v, err=%v", replayed, err)
+	}
+
+	revokedTask, err := companion.CreateTask(context.Background(), siteID, "https://lifecycle.example/revoked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revokedClaim, err := companion.Claim(context.Background(), first.ID)
+	if err != nil || revokedClaim == nil || revokedClaim.Task.ID != revokedTask.ID {
+		t.Fatalf("revoked-device claim = %+v, err=%v", revokedClaim, err)
+	}
+	if err := companion.RevokeDevice(context.Background(), first.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := companion.Authenticate(context.Background(), firstToken); apperror.As(err).Code != apperror.AuthRequired {
+		t.Fatalf("revoked device authentication error = %v, want %s", err, apperror.AuthRequired)
+	}
+	reclaimed, err := companion.Claim(context.Background(), second.ID)
+	if err != nil || reclaimed == nil || reclaimed.Task.ID != revokedTask.ID {
+		t.Fatalf("reclaimed revoked task = %+v, err=%v", reclaimed, err)
+	}
+	if _, err := companion.Finish(context.Background(), second.ID, revokedTask.ID, reclaimed.LeaseToken, "success", "released", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	expiringTask, err := companion.CreateTask(context.Background(), siteID, "https://lifecycle.example/expiring")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiringClaim, err := companion.Claim(context.Background(), second.ID)
+	if err != nil || expiringClaim == nil || expiringClaim.Task.ID != expiringTask.ID {
+		t.Fatalf("expiring task claim = %+v, err=%v", expiringClaim, err)
+	}
+	if _, err := db.Exec("UPDATE browser_tasks SET lease_expires_at = $1 WHERE id = $2", time.Now().UTC().Add(-time.Minute), expiringTask.ID); err != nil {
+		t.Fatal(err)
+	}
+	reclaimed, err = companion.Claim(context.Background(), third.ID)
+	if err != nil || reclaimed == nil || reclaimed.Task.ID != expiringTask.ID || reclaimed.Task.AttemptCount != 2 {
+		t.Fatalf("expired task re-claim = %+v, err=%v", reclaimed, err)
+	}
+	if _, err := companion.Heartbeat(context.Background(), second.ID, expiringTask.ID, expiringClaim.LeaseToken); apperror.As(err).Code != apperror.Conflict {
+		t.Fatalf("expired lease heartbeat error = %v, want %s", err, apperror.Conflict)
+	}
+	if _, err := companion.Finish(context.Background(), third.ID, expiringTask.ID, reclaimed.LeaseToken, "already_checked", "already", nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func stringPtr(value string) *string { return &value }
 
 func TestPostgresServiceCompatibility(t *testing.T) {
 	db, dsn := integrationSchema(t)

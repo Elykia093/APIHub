@@ -12,9 +12,11 @@ const links = [
   { to: '/sites', label: '站点管理', icon: 'sites' },
   { to: '/checkins', label: '签到记录', icon: 'checkins' },
   { to: '/announcements', label: '公告中心', icon: 'announcements' },
+  { to: '/companions', label: '浏览器伴侣', icon: 'sites' },
 ] as const;
 const routeTitles: Record<string, string> = {
   announcements: '公告中心',
+  companions: '浏览器伴侣',
   checkins: '签到记录',
   overview: '仪表盘',
   'site-edit': '编辑站点',

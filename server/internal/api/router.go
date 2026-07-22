@@ -34,6 +34,7 @@ type Dependencies struct {
 	Sites         *service.SiteService
 	Checkins      *service.CheckinService
 	Announcements *service.AnnouncementService
+	Companion     *service.CompanionService
 	Scheduler     *service.Scheduler
 	Adapters      *adapter.Registry
 	Logger        *slog.Logger
@@ -53,11 +54,16 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	h := &handler{dependencies: dependencies}
 	globalLimiter := newLimiter(240, time.Minute).middleware()
 	router.Use(h.requestID(), h.recovery(), securityHeaders(), func(c *gin.Context) {
-		if strings.HasPrefix(c.Request.URL.Path, "/api/v1/") && !authorized(c.GetHeader("Authorization"), dependencies.Config.AdminToken) {
+		apiPath := c.Request.URL.Path
+		isCompanion := strings.HasPrefix(apiPath, "/api/v1/companion/")
+		if isCompanion {
+			c.Header("Cache-Control", "no-store")
+		}
+		if strings.HasPrefix(apiPath, "/api/v1/") && !isCompanion && !authorized(c.GetHeader("Authorization"), dependencies.Config.AdminToken) {
 			c.Next()
 			return
 		}
-		if c.Request.Method == http.MethodPost && dedicatedRateLimitRoute.MatchString(c.Request.URL.Path) {
+		if c.Request.Method == http.MethodPost && dedicatedRateLimitRoute.MatchString(apiPath) {
 			c.Next()
 			return
 		}
@@ -81,6 +87,16 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	management.POST("/sites/:siteId/announcement-syncs", newLimiter(20, time.Minute).middleware(), h.syncAnnouncements)
 	management.Match(readMethods, "/announcements", h.listAnnouncements)
 	management.PATCH("/announcements/:announcementId", h.setAnnouncementRead)
+	management.POST("/companion-pairing-codes", h.createCompanionPairingCode)
+	management.Match(readMethods, "/companion-devices", h.listCompanionDevices)
+	management.POST("/companion-devices/:deviceId/revocations", h.revokeCompanionDevice)
+	management.POST("/sites/:siteId/browser-tasks", h.createBrowserTask)
+	management.Match(readMethods, "/browser-tasks", h.listBrowserTasks)
+	companion := router.Group("/api/v1/companion")
+	companion.POST("/pairings", newLimiter(10, 5*time.Minute).middleware(), h.pairCompanion)
+	companion.POST("/tasks/claims", h.claimBrowserTask)
+	companion.POST("/tasks/:taskId/heartbeats", h.heartbeatBrowserTask)
+	companion.POST("/tasks/:taskId/results", h.finishBrowserTask)
 	router.NoRoute(h.serveWeb)
 	return router
 }
@@ -321,6 +337,216 @@ func (h *handler) setAnnouncementRead(c *gin.Context) {
 		return
 	}
 	result, err := h.dependencies.Announcements.SetRead(c.Request.Context(), id, *request.Read)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"data": result})
+}
+
+func (h *handler) createCompanionPairingCode(c *gin.Context) {
+	var request struct{}
+	if !h.decode(c, &request) {
+		return
+	}
+	code, expiresAt, err := h.dependencies.Companion.CreatePairingCode(c.Request.Context())
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(201, gin.H{"data": gin.H{"code": code, "expiresAt": expiresAt}})
+}
+
+func (h *handler) listCompanionDevices(c *gin.Context) {
+	result, err := h.dependencies.Companion.ListDevices(c.Request.Context())
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"data": result})
+}
+
+func (h *handler) revokeCompanionDevice(c *gin.Context) {
+	id, ok := h.uuidParam(c, "deviceId")
+	if !ok {
+		return
+	}
+	if err := h.dependencies.Companion.RevokeDevice(c.Request.Context(), id); err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(201, gin.H{"data": gin.H{"id": id, "revoked": true}})
+}
+
+func (h *handler) createBrowserTask(c *gin.Context) {
+	siteID, ok := h.uuidParam(c, "siteId")
+	if !ok {
+		return
+	}
+	var request struct {
+		TargetURL string `json:"targetUrl"`
+	}
+	if !h.decode(c, &request, "targetUrl") {
+		return
+	}
+	if strings.TrimSpace(request.TargetURL) == "" || len([]rune(request.TargetURL)) > 2048 {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "targetUrl must contain 1 to 2048 characters", false))
+		return
+	}
+	result, err := h.dependencies.Companion.CreateTask(c.Request.Context(), siteID, request.TargetURL)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(201, gin.H{"data": result})
+}
+
+func (h *handler) listBrowserTasks(c *gin.Context) {
+	query := c.Request.URL.Query()
+	for key := range query {
+		if key != "limit" {
+			h.fail(c, apperror.New(422, apperror.ValidationError, "Unknown query field: "+key, false))
+			return
+		}
+	}
+	limit := 50
+	if values, present := query["limit"]; present {
+		if len(values) != 1 {
+			h.fail(c, apperror.New(422, apperror.ValidationError, "limit must be between 1 and 100", false))
+			return
+		}
+		parsed, valid := parseBoundedInteger(values[0], 1, 100)
+		if !valid {
+			h.fail(c, apperror.New(422, apperror.ValidationError, "limit must be between 1 and 100", false))
+			return
+		}
+		limit = parsed
+	}
+	result, err := h.dependencies.Companion.ListTasks(c.Request.Context(), limit)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"data": result})
+}
+
+func (h *handler) pairCompanion(c *gin.Context) {
+	var request struct {
+		Code       string `json:"code"`
+		DeviceName string `json:"deviceName"`
+	}
+	if !h.decode(c, &request, "code", "deviceName") {
+		return
+	}
+	if strings.TrimSpace(request.Code) == "" || len([]rune(request.Code)) > 64 {
+		h.fail(c, apperror.New(401, apperror.AuthRequired, "Pairing code is invalid or expired", false))
+		return
+	}
+	device, token, err := h.dependencies.Companion.Pair(c.Request.Context(), request.Code, request.DeviceName)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(201, gin.H{"data": gin.H{"device": device, "deviceToken": token}})
+}
+
+func (h *handler) companionDevice(c *gin.Context) (service.CompanionDevice, bool) {
+	match := bearerAuthorization.FindStringSubmatch(c.GetHeader("Authorization"))
+	if len(match) != 2 {
+		h.fail(c, apperror.New(401, apperror.AuthRequired, "Companion device authentication required", false))
+		return service.CompanionDevice{}, false
+	}
+	device, err := h.dependencies.Companion.Authenticate(c.Request.Context(), match[1])
+	if err != nil {
+		h.fail(c, err)
+		return service.CompanionDevice{}, false
+	}
+	return device, true
+}
+
+func (h *handler) claimBrowserTask(c *gin.Context) {
+	device, ok := h.companionDevice(c)
+	if !ok {
+		return
+	}
+	claimed, err := h.dependencies.Companion.Claim(c.Request.Context(), device.ID)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	if claimed == nil {
+		c.Status(http.StatusNoContent)
+		return
+	}
+	task := claimed.Task
+	c.JSON(200, gin.H{"data": gin.H{"id": task.ID, "siteId": task.SiteID, "siteName": task.SiteName, "targetUrl": task.TargetURL, "status": task.Status, "attemptCount": task.AttemptCount, "leaseToken": claimed.LeaseToken}})
+}
+
+func (h *handler) companionLease(c *gin.Context) (service.CompanionDevice, string, bool) {
+	device, ok := h.companionDevice(c)
+	if !ok {
+		return service.CompanionDevice{}, "", false
+	}
+	lease := c.GetHeader("X-Companion-Lease")
+	if len(lease) < 32 || len(lease) > 128 {
+		h.fail(c, apperror.New(401, apperror.AuthRequired, "Browser task lease is required", false))
+		return service.CompanionDevice{}, "", false
+	}
+	return device, lease, true
+}
+
+func (h *handler) heartbeatBrowserTask(c *gin.Context) {
+	taskID, ok := h.uuidParam(c, "taskId")
+	if !ok {
+		return
+	}
+	device, lease, ok := h.companionLease(c)
+	if !ok {
+		return
+	}
+	result, err := h.dependencies.Companion.Heartbeat(c.Request.Context(), device.ID, taskID, lease)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	c.JSON(200, gin.H{"data": result})
+}
+
+func (h *handler) finishBrowserTask(c *gin.Context) {
+	taskID, ok := h.uuidParam(c, "taskId")
+	if !ok {
+		return
+	}
+	device, ok := h.companionDevice(c)
+	if !ok {
+		return
+	}
+	var request struct {
+		LeaseToken string  `json:"leaseToken"`
+		Status     string  `json:"status"`
+		Message    string  `json:"message"`
+		Balance    *string `json:"balance"`
+	}
+	if !h.decode(c, &request, "leaseToken", "status", "message", "balance") {
+		return
+	}
+	if len(request.LeaseToken) < 32 || len(request.LeaseToken) > 128 {
+		h.fail(c, apperror.New(401, apperror.AuthRequired, "Browser task lease is invalid", false))
+		return
+	}
+	if request.Status != "success" && request.Status != "already_checked" && request.Status != "manual_required" && request.Status != "failed" {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "Invalid browser task status", false))
+		return
+	}
+	if len([]rune(request.Message)) > 500 {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "message must contain at most 500 characters", false))
+		return
+	}
+	if request.Balance != nil && len([]rune(*request.Balance)) > 128 {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "balance must contain at most 128 characters", false))
+		return
+	}
+	result, err := h.dependencies.Companion.Finish(c.Request.Context(), device.ID, taskID, request.LeaseToken, request.Status, request.Message, request.Balance)
 	if err != nil {
 		h.fail(c, err)
 		return

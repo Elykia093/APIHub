@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1.7
 
-FROM node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d AS web-build
+ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b1270fd37b7e9a7285cf83b6951452d
+ARG GO_IMAGE=golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
+ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b
+
+FROM ${NODE_IMAGE} AS web-build
 
 WORKDIR /src
 COPY web/package.json web/package-lock.json ./web/
@@ -9,7 +13,16 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY web ./web
 RUN cd web && npm run build
 
-FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS go-build
+FROM ${GO_IMAGE} AS go-build
+
+ARG GOPROXY=https://proxy.golang.org,direct
+ENV GOPROXY=$GOPROXY
+
+# Optional build-only resource controls for small Docker hosts. Empty values
+# preserve the Go toolchain defaults used by CI and normal local builds.
+ARG GO_BUILD_GOMAXPROCS
+ARG GO_BUILD_GOMEMLIMIT
+ARG GO_BUILD_FLAGS
 
 ARG TARGETOS=linux
 ARG TARGETARCH
@@ -25,12 +38,15 @@ RUN rm -rf /src/server/internal/webui/dist
 COPY --from=web-build /src/server/internal/webui/dist ./internal/webui/dist
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    if [ -n "$GO_BUILD_GOMAXPROCS" ]; then export GOMAXPROCS="$GO_BUILD_GOMAXPROCS"; fi; \
+    if [ -n "$GO_BUILD_GOMEMLIMIT" ]; then export GOMEMLIMIT="$GO_BUILD_GOMEMLIMIT"; fi; \
+    if [ -n "$GO_BUILD_FLAGS" ]; then export GOFLAGS="$GO_BUILD_FLAGS"; fi; \
     CGO_ENABLED=0 GOOS="$TARGETOS" GOARCH="$TARGETARCH" \
     go build -trimpath \
     -ldflags="-s -w -buildid= -X main.version=$VERSION -X main.revision=$REVISION" \
     -o /out/apihub ./cmd/apihub
 
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b AS runtime
+FROM ${RUNTIME_IMAGE} AS runtime
 
 ARG VERSION=dev
 ARG REVISION=unknown
