@@ -30,7 +30,7 @@ import (
 )
 
 func TestPostgresMigrations(t *testing.T) {
-	t.Run("empty database installs v1 through v3", func(t *testing.T) {
+	t.Run("empty database installs v1 through v4", func(t *testing.T) {
 		db, _ := integrationSchema(t)
 		if err := migrate.Run(context.Background(), db); err != nil {
 			t.Fatal(err)
@@ -39,8 +39,8 @@ func TestPostgresMigrations(t *testing.T) {
 		if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil {
 			t.Fatal(err)
 		}
-		if count != 3 {
-			t.Fatalf("migration count = %d, want 3", count)
+		if count != 4 {
+			t.Fatalf("migration count = %d, want 4", count)
 		}
 		for _, table := range []string{"companion_pairing_codes", "companion_devices", "browser_tasks"} {
 			var relation sql.NullString
@@ -53,7 +53,7 @@ func TestPostgresMigrations(t *testing.T) {
 		}
 	})
 
-	t.Run("v1 database upgrades through v3", func(t *testing.T) {
+	t.Run("v1 database upgrades through v4", func(t *testing.T) {
 		db, _ := integrationSchema(t)
 		migrations := migrate.All()
 		if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, checksum VARCHAR(64) NOT NULL, applied_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP)`); err != nil {
@@ -69,8 +69,8 @@ func TestPostgresMigrations(t *testing.T) {
 			t.Fatal(err)
 		}
 		var count int
-		if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil || count != 3 {
-			t.Fatalf("migration count after v1 upgrade = %d, err=%v; want 3", count, err)
+		if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&count); err != nil || count != 4 {
+			t.Fatalf("migration count after v1 upgrade = %d, err=%v; want 4", count, err)
 		}
 		if _, err := db.Exec(`INSERT INTO sites(id, name, base_url, adapter, user_id, access_token_ciphertext, checkin_cron, announcement_cron, timezone, created_at, updated_at) VALUES($1, 'sub2', 'https://sub2.example', 'sub2api', '', 'cipher', '15 8 * * *', '*/30 * * * *', 'UTC', NOW(), NOW())`, uuid.NewString()); err != nil {
 			t.Fatalf("v2 adapter constraint is not active: %v", err)
@@ -173,6 +173,72 @@ func TestPostgresCompanionConcurrentClaims(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Fatal("concurrent companion claims timed out")
 		}
+	}
+}
+
+func TestPostgresCompanionSingleActiveTaskPerDevice(t *testing.T) {
+	db, _ := integrationSchema(t)
+	if err := migrate.Run(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now().UTC()
+	deviceID := uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO companion_devices(id, name, token_hash, created_at) VALUES($1, 'single-device', $2, $3)`, deviceID, secretHash("single-device-token"), now); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 2; index++ {
+		siteID := uuid.NewString()
+		baseURL := fmt.Sprintf("https://single-device-%d.example", index+1)
+		if _, err := db.Exec(`INSERT INTO sites(id, name, base_url, adapter, user_id, access_token_ciphertext, checkin_cron, announcement_cron, timezone, created_at, updated_at) VALUES($1, $2, $3, 'new-api', '1', 'cipher', '15 8 * * *', '*/30 * * * *', 'UTC', $4, $4)`, siteID, fmt.Sprintf("single-device-%d", index+1), baseURL, now); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO browser_tasks(id, site_id, target_url, status, created_at) VALUES($1, $2, $3, 'queued', $4)`, uuid.NewString(), siteID, baseURL+"/task", now.Add(time.Duration(index)*time.Millisecond)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	type claimResult struct {
+		claim *ClaimedBrowserTask
+		err   error
+	}
+	service := NewCompanionService(db)
+	start := make(chan struct{})
+	results := make(chan claimResult, 2)
+	for range 2 {
+		go func() {
+			<-start
+			claim, err := service.Claim(context.Background(), deviceID)
+			results <- claimResult{claim: claim, err: err}
+		}()
+	}
+	close(start)
+
+	claimed, empty := 0, 0
+	for range 2 {
+		select {
+		case result := <-results:
+			if result.err != nil {
+				t.Fatal(result.err)
+			}
+			if result.claim == nil {
+				empty++
+			} else {
+				claimed++
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("same-device companion claims timed out")
+		}
+	}
+	if claimed != 1 || empty != 1 {
+		t.Fatalf("same-device claims: claimed=%d empty=%d, want 1 each", claimed, empty)
+	}
+	var leased, queued int
+	if err := db.QueryRow(`SELECT count(*) FILTER (WHERE status = 'leased' AND assigned_device_id = $1), count(*) FILTER (WHERE status = 'queued') FROM browser_tasks`, deviceID).Scan(&leased, &queued); err != nil {
+		t.Fatal(err)
+	}
+	if leased != 1 || queued != 1 {
+		t.Fatalf("task states: leased=%d queued=%d, want 1 each", leased, queued)
 	}
 }
 

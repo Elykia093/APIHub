@@ -6,6 +6,9 @@ ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710e
 
 FROM ${NODE_IMAGE} AS web-build
 
+ARG NPM_REGISTRY=https://registry.npmjs.org
+ENV npm_config_registry=$NPM_REGISTRY
+
 WORKDIR /src
 COPY web/package.json web/package-lock.json ./web/
 RUN --mount=type=cache,target=/root/.npm \

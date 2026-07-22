@@ -1,10 +1,27 @@
 const ALARM = 'apihub-companion-poll';
+const RUN_STATE = 'apihub-companion-active-run';
 const ACTIVE = new Set();
+const CANCELLED = new Set();
+let pollPromise = null;
 importScripts('url.js');
 const { apiUrl, normalizeApiBase } = self.ApiHubUrl;
 
 async function settings() {
   return chrome.storage.local.get({ apiBase: '', deviceToken: '', deviceName: '', foregroundOnManual: true });
+}
+
+async function loadRunState() {
+  const state = await chrome.storage.session.get({ [RUN_STATE]: null });
+  return state[RUN_STATE];
+}
+
+async function saveRunState(task, tabId, actedUrl, manualSeen, deadlineAt) {
+  await chrome.storage.session.set({ [RUN_STATE]: { task, tabId, actedUrl, manualSeen, deadlineAt } });
+}
+
+async function clearRunState(taskId) {
+  const state = await loadRunState();
+  if (!state || state.task?.id === taskId) await chrome.storage.session.remove(RUN_STATE);
 }
 
 async function request(path, options = {}) {
@@ -28,21 +45,19 @@ async function pair(apiBase, code, deviceName) {
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload?.error?.message || '配对失败');
 	await chrome.storage.local.set({ apiBase: normalizedBase, deviceToken: payload.data.deviceToken, deviceName: payload.data.device.name, lastError: '' });
+	await chrome.storage.session.remove(RUN_STATE);
   await chrome.alarms.create(ALARM, { periodInMinutes: 1 });
   return payload.data.device;
 }
 
 async function waitForLoad(tabId, timeout = 30_000) {
-  const current = await chrome.tabs.get(tabId);
-  if (current.status === 'complete') return;
-  await new Promise((resolve, reject) => {
-    const timer = setTimeout(() => { chrome.tabs.onUpdated.removeListener(listener); reject(new Error('页面加载超时')); }, timeout);
-    const listener = (updatedId, info) => {
-      if (updatedId !== tabId || info.status !== 'complete') return;
-      clearTimeout(timer); chrome.tabs.onUpdated.removeListener(listener); resolve();
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-  });
+  const deadline = Date.now() + timeout;
+  while (Date.now() < deadline) {
+    const current = await chrome.tabs.get(tabId);
+    if (current.status === 'complete') return;
+    await new Promise((resolve) => setTimeout(resolve, 1_000));
+  }
+  throw new Error('页面加载超时');
 }
 
 async function inspect(tabId, act) {
@@ -65,20 +80,28 @@ async function report(task, status, message, balance) {
   });
 }
 
-async function runTask(task) {
+async function runTask(task, persisted = null) {
   if (ACTIVE.has(task.id)) return;
   ACTIVE.add(task.id);
-  let tabId;
+  CANCELLED.delete(task.id);
+  let tabId = persisted?.tabId;
   let lastHeartbeat = 0;
-  let actedUrl = '';
-  let manualSeen = false;
+  let actedUrl = persisted?.actedUrl || '';
+  let manualSeen = persisted?.manualSeen === true;
+  const deadlineAt = persisted?.deadlineAt || Date.now() + 10 * 60_000;
   try {
-    const tab = await chrome.tabs.create({ url: task.targetUrl, active: false });
-    tabId = tab.id;
-    if (!tabId) throw new Error('无法创建签到标签页');
+    await saveRunState(task, tabId, actedUrl, manualSeen, deadlineAt);
+    if (tabId) {
+      try { await chrome.tabs.get(tabId); } catch { tabId = undefined; }
+    }
+    if (!tabId) {
+      const tab = await chrome.tabs.create({ url: task.targetUrl, active: false });
+      tabId = tab.id;
+      if (!tabId) throw new Error('无法创建签到标签页');
+      await saveRunState(task, tabId, actedUrl, manualSeen, deadlineAt);
+    }
     await waitForLoad(tabId);
-    const deadline = Date.now() + 10 * 60_000;
-    while (Date.now() < deadline) {
+    while (Date.now() < deadlineAt && !CANCELLED.has(task.id)) {
       if (Date.now() - lastHeartbeat > 45_000) {
         await request(`/api/v1/companion/tasks/${task.id}/heartbeats`, { method: 'POST', headers: { 'X-Companion-Lease': task.leaseToken } });
         lastHeartbeat = Date.now();
@@ -93,25 +116,37 @@ async function runTask(task) {
       }
       if (result.state === 'manual_required') {
         manualSeen = true;
+        await saveRunState(task, tabId, actedUrl, manualSeen, deadlineAt);
         const state = await settings();
         if (state.foregroundOnManual) await focus(tabId);
         await chrome.action.setBadgeText({ text: '!' });
         await chrome.action.setBadgeBackgroundColor({ color: '#D97706' });
       }
-      if (result.state === 'action') actedUrl = current.url || task.targetUrl;
+      if (result.state === 'action') {
+        actedUrl = current.url || task.targetUrl;
+        await saveRunState(task, tabId, actedUrl, manualSeen, deadlineAt);
+      }
       await waitForPageSignal(tabId);
     }
+    if (CANCELLED.has(task.id)) return;
     await report(task, 'manual_required', manualSeen ? '等待用户完成登录或人机验证超时' : '页面未出现可执行的签到入口');
   } catch (error) {
     await report(task, tabId ? 'manual_required' : 'failed', error instanceof Error ? error.message : '浏览器任务失败').catch(() => undefined);
   } finally {
     ACTIVE.delete(task.id);
+    CANCELLED.delete(task.id);
+    await clearRunState(task.id);
     await chrome.action.setBadgeText({ text: '' });
     if (tabId && manualSeen && (await settings()).foregroundOnManual) await focus(tabId).catch(() => undefined);
   }
 }
 
-async function poll() {
+async function pollOnce() {
+  const persisted = await loadRunState();
+  if (persisted?.task) {
+    await runTask(persisted.task, persisted);
+    return;
+  }
   if (ACTIVE.size > 0) return;
   try {
     const task = await request('/api/v1/companion/tasks/claims', { method: 'POST' });
@@ -122,13 +157,37 @@ async function poll() {
   }
 }
 
-chrome.runtime.onInstalled.addListener(() => chrome.alarms.create(ALARM, { periodInMinutes: 1 }));
-chrome.runtime.onStartup.addListener(() => chrome.alarms.create(ALARM, { periodInMinutes: 1 }));
+function poll() {
+  if (pollPromise) return pollPromise;
+  pollPromise = pollOnce().finally(() => { pollPromise = null; });
+  return pollPromise;
+}
+
+async function ensureAlarm() {
+  const state = await settings();
+  if (state.apiBase && state.deviceToken) await chrome.alarms.create(ALARM, { periodInMinutes: 1 });
+  else await chrome.alarms.clear(ALARM);
+}
+
+async function disconnect() {
+  const persisted = await loadRunState();
+  if (persisted?.task) {
+    CANCELLED.add(persisted.task.id);
+    await report(persisted.task, 'failed', '设备已在本机断开连接').catch(() => undefined);
+    if (persisted.tabId) await chrome.tabs.remove(persisted.tabId).catch(() => undefined);
+    await clearRunState(persisted.task.id);
+  }
+  await chrome.storage.local.remove(['apiBase', 'deviceToken', 'deviceName']);
+  await chrome.alarms.clear(ALARM);
+}
+
+chrome.runtime.onInstalled.addListener(() => { void ensureAlarm(); });
+chrome.runtime.onStartup.addListener(() => { void ensureAlarm(); });
 chrome.alarms.onAlarm.addListener((alarm) => { if (alarm.name === ALARM) void poll(); });
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   const action = message?.type === 'apihub:pair' ? pair(message.apiBase, message.code, message.deviceName)
     : message?.type === 'apihub:poll' ? poll().then(() => true)
-      : message?.type === 'apihub:disconnect' ? chrome.storage.local.remove(['apiBase', 'deviceToken', 'deviceName']).then(() => true)
+      : message?.type === 'apihub:disconnect' ? disconnect().then(() => true)
         : null;
   if (!action) return;
   action.then((data) => sendResponse({ ok: true, data }), (error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : '操作失败' }));

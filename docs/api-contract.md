@@ -127,6 +127,7 @@
 - 管理端 `GET /api/v1/browser-tasks?limit=50` 查询任务。
 - 伴侣端 `POST /api/v1/companion/pairings` 消费配对码并仅返回一次设备令牌。
 - 伴侣端领取、续租和回传分别使用 `/api/v1/companion/tasks/claims`、`/{taskId}/heartbeats` 与 `/{taskId}/results`。
+- 每台设备同一时刻最多持有一个租约；已有活动租约时再次领取返回 `204`，不会额外占用队列任务。
 
 任务状态为 `queued -> leased -> success | already_checked | manual_required | failed`。领取带两分钟租约，心跳续租，过期后可重新领取；终态结果回传幂等。设备令牌、配对码、租约令牌在数据库只保存 SHA-256 摘要。任务和响应不包含站点访问令牌、用户 ID、Cookie、LocalStorage、OAuth code 或验证码。详细请求、错误和回滚约束见 `docs/browser-companion.md`。
 

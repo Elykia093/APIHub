@@ -352,6 +352,11 @@ func (s *CompanionService) Claim(ctx context.Context, deviceID string) (*Claimed
         SELECT id
         FROM browser_tasks
         WHERE status = 'queued'
+          AND NOT EXISTS (
+            SELECT 1
+            FROM browser_tasks active
+            WHERE active.assigned_device_id = $1 AND active.status = 'leased'
+          )
         ORDER BY created_at, id
         FOR UPDATE SKIP LOCKED
         LIMIT 1

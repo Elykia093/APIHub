@@ -150,6 +150,14 @@ var migrations = []Migration{
       CREATE INDEX browser_tasks_device_idx ON browser_tasks(assigned_device_id, status, lease_expires_at);
     `,
 	},
+	{
+		Version: 4,
+		SQL: `
+      CREATE UNIQUE INDEX browser_tasks_active_device_idx
+        ON browser_tasks(assigned_device_id)
+        WHERE status = 'leased' AND assigned_device_id IS NOT NULL;
+    `,
+	},
 }
 
 func All() []Migration { return append([]Migration(nil), migrations...) }

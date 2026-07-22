@@ -50,7 +50,7 @@ node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'
 docker compose up -d --build
 ```
 
-`.env.example` 预置 DaoCloud/NJU 镜像路径和 `goproxy.cn`，同时保留固定 digest。无法访问这些加速源时，可删除 `NODE_BUILD_IMAGE`、`GO_BUILD_IMAGE`、`RUNTIME_IMAGE`、`GOPROXY` 四行，Compose 会回退到 Dockerfile 的官方源。
+`.env.example` 预置 DaoCloud/NJU 镜像路径、npm 镜像和 `goproxy.cn`，同时保留固定 digest。无法访问这些加速源时，可删除 `POSTGRES_IMAGE`、`NODE_BUILD_IMAGE`、`GO_BUILD_IMAGE`、`RUNTIME_IMAGE`、`NPM_REGISTRY`、`GOPROXY` 六行，Compose 会回退到 Dockerfile 和 Compose 的官方源。
 
 如果 Docker 主机内存低于 1 GiB，可额外设置 `GO_BUILD_GOMAXPROCS=1`、`GO_BUILD_GOMEMLIMIT=384MiB` 和 `GO_BUILD_FLAGS=-p=1 -tags=nomsgpack`，限制 Go 编译并发并跳过 APIHub 未使用的 Gin MessagePack 绑定；这些变量只影响构建阶段，不改变运行容器的 `GOMEMLIMIT`。
 
@@ -233,7 +233,7 @@ cd server
 go test -tags=integration -v ./internal/service
 ```
 
-它覆盖空库、v1→v2→v3、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 18.4、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 Go OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
+它覆盖空库、v1→v2→v3→v4、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 18.4、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 Go OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
 
 ## 目录
 

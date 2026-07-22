@@ -275,7 +275,7 @@ jobs:
 
           schema_state="$("${compose[@]}" exec -T postgres psql -U apihub -d apihub -Atqc "SELECT string_agg(version::text || ':' || checksum, ',' ORDER BY version) FROM schema_migrations")"
           test -n "$schema_state"
-          test "$("${compose[@]}" exec -T postgres psql -U apihub -d apihub -Atqc 'SELECT count(*) FROM schema_migrations')" = "3"
+          test "$("${compose[@]}" exec -T postgres psql -U apihub -d apihub -Atqc 'SELECT count(*) FROM schema_migrations')" = "4"
 
           "${compose[@]}" up -d --force-recreate postgres
           for attempt in $(seq 1 30); do

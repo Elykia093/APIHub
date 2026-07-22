@@ -28,3 +28,12 @@ test('manifest and page agent preserve the browser identity boundary', () => {
   assert.match(source, /MAX_ELEMENTS/);
   assert.match(source, /MAX_ELEMENT_TEXT/);
 });
+
+test('background persists one active run across service worker restarts', () => {
+  const source = fs.readFileSync(path.join(__dirname, 'background.js'), 'utf8');
+  assert.match(source, /chrome\.storage\.session/);
+  assert.match(source, /pollPromise/);
+  assert.match(source, /loadRunState\(\)/);
+  assert.match(source, /while \(Date\.now\(\) < deadline\)/);
+  assert.match(source, /chrome\.tabs\.get\(tabId\)/);
+});
