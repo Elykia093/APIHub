@@ -98,6 +98,66 @@ var migrations = []Migration{
         CHECK (adapter IN ('new-api', 'sub2api', 'zen-api'));
     `,
 	},
+	{
+		Version: 3,
+		SQL: `
+      CREATE TABLE companion_pairing_codes (
+        id UUID PRIMARY KEY,
+        code_hash VARCHAR(64) NOT NULL UNIQUE,
+        expires_at TIMESTAMPTZ NOT NULL,
+        consumed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL
+      );
+
+      CREATE INDEX companion_pairing_codes_active_idx
+        ON companion_pairing_codes(expires_at)
+        WHERE consumed_at IS NULL;
+
+      CREATE TABLE companion_devices (
+        id UUID PRIMARY KEY,
+        name VARCHAR(80) NOT NULL,
+        token_hash VARCHAR(64) NOT NULL UNIQUE,
+        created_at TIMESTAMPTZ NOT NULL,
+        last_seen_at TIMESTAMPTZ,
+        revoked_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX companion_devices_active_idx
+        ON companion_devices(last_seen_at DESC, id DESC)
+        WHERE revoked_at IS NULL;
+
+      CREATE TABLE browser_tasks (
+        id UUID PRIMARY KEY,
+        site_id UUID NOT NULL REFERENCES sites(id) ON DELETE RESTRICT,
+        target_url TEXT NOT NULL,
+        status VARCHAR(32) NOT NULL CHECK (status IN ('queued', 'leased', 'success', 'already_checked', 'manual_required', 'failed')),
+        assigned_device_id UUID REFERENCES companion_devices(id) ON DELETE SET NULL,
+        lease_token_hash VARCHAR(64),
+        lease_expires_at TIMESTAMPTZ,
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        message TEXT NOT NULL DEFAULT '',
+        balance VARCHAR(128),
+        created_at TIMESTAMPTZ NOT NULL,
+        started_at TIMESTAMPTZ,
+        finished_at TIMESTAMPTZ
+      );
+
+      CREATE INDEX browser_tasks_queue_idx ON browser_tasks(status, created_at, id);
+      CREATE UNIQUE INDEX browser_tasks_active_site_idx
+        ON browser_tasks(site_id)
+        WHERE status IN ('queued', 'leased');
+      CREATE INDEX browser_tasks_site_idx ON browser_tasks(site_id, created_at DESC, id DESC);
+      CREATE INDEX browser_tasks_device_idx ON browser_tasks(assigned_device_id, status, lease_expires_at);
+    `,
+	},
+	{
+		Version: 4,
+		SQL: `
+      CREATE UNIQUE INDEX browser_tasks_active_device_idx
+        ON browser_tasks(assigned_device_id)
+        WHERE status = 'leased' AND assigned_device_id IS NOT NULL;
+    `,
+	},
 }
 
 func All() []Migration { return append([]Migration(nil), migrations...) }

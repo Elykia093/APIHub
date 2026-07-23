@@ -16,7 +16,7 @@ type compatibilityFixture struct {
 
 func TestCompatibilityVector(t *testing.T) {
 	_, file, _, _ := runtime.Caller(0)
-	payload, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "..", "..", "tests", "fixtures", "compatibility-vectors.json"))
+	payload, err := os.ReadFile(filepath.Join(filepath.Dir(file), "..", "testdata", "compatibility-vectors.json"))
 	if err != nil {
 		t.Fatalf("read compatibility fixture: %v", err)
 	}

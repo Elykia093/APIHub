@@ -23,3 +23,10 @@ export type Announcement = { id: string; siteId: string; siteName?: string; sour
 export type AnnouncementSync = { id: string; siteId: string; status: 'running' | 'success' | 'partial' | 'failed'; addedCount: number; message: string; startedAt: string; finishedAt: string | null; requestId: string };
 export type Summary = { sites: { total: number; enabled: number }; today: Partial<Record<CheckinStatus, number>>; unreadAnnouncements: number };
 export type APIErrorBody = { error: { code: string; message: string; retryable: boolean; requestId: string } };
+export type CompanionDevice = { id: string; name: string; createdAt: string; lastSeenAt: string | null; revokedAt: string | null };
+export type BrowserTaskStatus = 'queued' | 'leased' | 'success' | 'already_checked' | 'manual_required' | 'failed';
+export type BrowserTask = {
+  id: string; siteId: string; siteName?: string; targetUrl: string; status: BrowserTaskStatus;
+  assignedDeviceId: string | null; assignedDeviceName?: string; leaseExpiresAt: string | null;
+  attemptCount: number; message: string; balance: string | null; createdAt: string; startedAt: string | null; finishedAt: string | null;
+};

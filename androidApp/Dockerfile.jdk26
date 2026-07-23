@@ -1,0 +1,44 @@
+# syntax=docker/dockerfile:1.7
+FROM docker.m.daocloud.io/library/eclipse-temurin:26-jdk-noble@sha256:892b3d1ed859f102db403e01415ecd05b1dd8ed6679857fe19044a49e45a911e
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG UBUNTU_MIRROR
+ARG ANDROID_COMMAND_LINE_TOOLS_VERSION=13114758
+ARG ANDROID_COMMAND_LINE_TOOLS_SHA256=7ec965280a073311c339e571cd5de778b9975026cfcbe79f2b1cdcb1e15317ee
+ARG ANDROID_REPOSITORY_URL=https://dl.google.com/android/repository
+ARG ANDROID_DOWNLOAD_TIMEOUT=300
+ARG ANDROID_SDKMANAGER_TIMEOUT=900
+
+ENV ANDROID_HOME=/opt/android-sdk \
+    ANDROID_SDK_ROOT=/opt/android-sdk \
+    GRADLE_USER_HOME=/opt/gradle-cache \
+    LANG=C.UTF-8 \
+    PATH=/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:$PATH
+
+RUN if [ -n "$UBUNTU_MIRROR" ]; then \
+        mirror="${UBUNTU_MIRROR%/}"; \
+        sed -i -E "s#https?://(archive|security).ubuntu.com/ubuntu/?#${mirror}/#g" /etc/apt/sources.list.d/ubuntu.sources; \
+    fi \
+    && apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update \
+    && apt-get install -y --no-install-recommends ca-certificates curl git libstdc++6 unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl -fsSL --retry 3 --retry-all-errors --connect-timeout 15 --max-time "$ANDROID_DOWNLOAD_TIMEOUT" \
+        "${ANDROID_REPOSITORY_URL%/}/commandlinetools-linux-${ANDROID_COMMAND_LINE_TOOLS_VERSION}_latest.zip" \
+        -o /tmp/android-command-line-tools.zip \
+    && echo "${ANDROID_COMMAND_LINE_TOOLS_SHA256}  /tmp/android-command-line-tools.zip" | sha256sum -c - \
+    && mkdir -p "$ANDROID_HOME/cmdline-tools" /tmp/android-command-line-tools \
+    && unzip -q /tmp/android-command-line-tools.zip -d /tmp/android-command-line-tools \
+    && mv /tmp/android-command-line-tools/cmdline-tools "$ANDROID_HOME/cmdline-tools/latest" \
+    && rm -rf /tmp/android-command-line-tools /tmp/android-command-line-tools.zip \
+    && yes | timeout "$ANDROID_SDKMANAGER_TIMEOUT" sdkmanager --licenses >/dev/null \
+    && timeout "$ANDROID_SDKMANAGER_TIMEOUT" sdkmanager \
+        "platform-tools" \
+        "platforms;android-37.0" \
+        "build-tools;36.0.0" \
+    && rm -rf /root/.android/cache
+
+COPY gradle/docker-mirrors.init.gradle.kts /opt/gradle/docker-mirrors.init.gradle.kts
+
+WORKDIR /workspace
+CMD ["bash"]

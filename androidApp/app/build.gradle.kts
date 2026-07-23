@@ -14,8 +14,8 @@ android {
         applicationId = "com.elykia.apihub"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.1.0-rc.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
     }
@@ -36,13 +36,21 @@ android {
     }
 
     compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
+        sourceCompatibility = JavaVersion.VERSION_26
+        targetCompatibility = JavaVersion.VERSION_26
     }
 
     buildFeatures {
         compose = true
         buildConfig = true
+    }
+
+    testOptions {
+        // OkHttp probes android.util.Log while running local JVM tests.
+        unitTests.isReturnDefaultValues = true
+        unitTests.all { test ->
+            test.maxHeapSize = "128m"
+        }
     }
 
     packaging {
@@ -51,7 +59,7 @@ android {
 }
 
 kotlin {
-    val localToolchain = providers.gradleProperty("javaToolchainVersion").orNull?.toIntOrNull() ?: 17
+    val localToolchain = providers.gradleProperty("javaToolchainVersion").orNull?.toIntOrNull() ?: 26
     jvmToolchain(localToolchain)
 }
 
