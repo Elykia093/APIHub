@@ -91,8 +91,10 @@ cd androidApp
 
 也可以用固定摘要的 Temurin 26 + Android SDK 镜像复现完整门禁。该命令为 800 MiB 服务器限制 Gradle 和本地测试 worker 各使用 128 MiB 堆、单 worker、进程内 Kotlin 编译；镜像 init script 仅在此命令显式启用，阿里云 Maven 镜像失败时仍回退到官方仓库：
 
+`UBUNTU_MIRROR` 只替换 Ubuntu apt 源；Android SDK 默认仍从 Google 官方仓库下载，并带连接、总下载和 `sdkmanager` 超时。可信代理可通过 `ANDROID_REPOSITORY_URL` 覆盖仓库基址，但仍会校验 command-line tools 的固定 SHA-256。
+
 ```powershell
-docker build -f androidApp/Dockerfile.jdk26 -t apihub/android-jdk26:26.0.1 androidApp
+docker build --build-arg UBUNTU_MIRROR=https://mirrors.ustc.edu.cn/ubuntu -f androidApp/Dockerfile.jdk26 -t apihub/android-jdk26:26.0.1 androidApp
 docker run --rm --memory=700m --memory-swap=2g `
   --volume "${PWD}/androidApp:/workspace" `
   --volume apihub-android-gradle-cache:/opt/gradle-cache `

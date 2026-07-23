@@ -435,6 +435,7 @@ jobs:
           printf '%s\n' "$GO_DIGEST" >"${archive%.tar}.digest"
           printf '%s\n' "$GO_METADATA" >"${archive%.tar}.metadata.json"
           (cd /tmp && sha256sum "$(basename "$archive")" >"$(basename "$archive").sha256")
+          (cd /tmp && sha256sum -c "$(basename "$archive").sha256")
           jq -e --arg digest "$GO_DIGEST" '."containerimage.digest" == $digest' "${archive%.tar}.metadata.json"
           mkdir -p "$layout"
           tar -xf "$archive" -C "$layout"

@@ -4,7 +4,7 @@ ARG NODE_IMAGE=node:24-bookworm-slim@sha256:6f7b03f7c2c8e2e784dcf9295400527b9b12
 ARG GO_IMAGE=golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651
 ARG RUNTIME_IMAGE=gcr.io/distroless/static-debian12:nonroot@sha256:aef9602f8710ec12bde19d593fed1f76c708531bb7aba205110f1029786ead7b
 
-FROM ${NODE_IMAGE} AS web-build
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS web-build
 
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ENV npm_config_registry=$NPM_REGISTRY
@@ -16,7 +16,7 @@ RUN --mount=type=cache,target=/root/.npm \
 COPY web ./web
 RUN cd web && npm run build
 
-FROM ${GO_IMAGE} AS go-build
+FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS go-build
 
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=$GOPROXY
