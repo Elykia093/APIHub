@@ -2,7 +2,7 @@
 
 ## 目标环境
 
-- Compose 固定 PostgreSQL 18.4 Alpine；较低版本不作为兼容目标，是否可运行仅属尽力而为，不进入测试矩阵。
+- Compose 固定 PostgreSQL 18 Alpine；较低版本不作为兼容目标，是否可运行仅属尽力而为，不进入测试矩阵。
 - 单管理员、单应用实例，默认连接池上限 5。
 - 当前容量假设：少于 100 个站点；每站每天 1 条签到当前记录；公告和同步历史低频增长。超过该规模前需重新验证查询计划、保留期和索引体积。
 
@@ -50,6 +50,6 @@
 
 ## 未验证项
 
-当前本机没有 Docker、`psql` 或真实 PostgreSQL 服务，因此本机只完成了 SQL 静态审查和 Go 非集成测试。仓库已增加以专用 `apihub_test` 数据库为门禁的 PostgreSQL 18.4 集成测试和 CI service；只有对应 CI job 实际通过后，才能把完整集成门禁标为已验证。2026-07-22 已在独立 Debian 12 Docker 主机（Docker 29.6.2、Compose 5.3.1）完成 PostgreSQL 18.4 空库启动、v1→v2→v3 迁移、浏览器伴侣写路径、重启持久化和容器加固 smoke；Docker Hub 构建阶段使用 DaoCloud 加速，Distroless 运行镜像使用已验证的 NJU 镜像路径。锁行为、备份恢复和生产数据量下的查询计划仍需在具备代表性数据的环境补证据。
+当前本机没有 Docker、`psql` 或真实 PostgreSQL 服务，因此本机只完成了 SQL 静态审查和 Go 非集成测试。仓库已增加以专用 `apihub_test` 数据库为门禁的 PostgreSQL 18 集成测试和 CI service；只有对应 CI job 实际通过后，才能把完整集成门禁标为已验证。2026-07-22 已在独立 Debian 12 Docker 主机（Docker 29.6.2、Compose 5.3.1）完成 PostgreSQL 18 空库启动、v1→v2→v3 迁移、浏览器伴侣写路径、重启持久化和容器加固 smoke；Docker Hub 构建阶段使用 DaoCloud 加速，Distroless 运行镜像使用已验证的 NJU 镜像路径。锁行为、备份恢复和生产数据量下的查询计划仍需在具备代表性数据的环境补证据。
 
-PostgreSQL 18 官方镜像的默认 `PGDATA` 为 `/var/lib/postgresql/18/docker`，Compose 因此把新卷 `apihub-postgres-18-data` 挂载到 `/var/lib/postgresql`。不能把旧 `apihub-postgres-data` 物理卷直接挂给 18；升级前必须先从旧实例执行逻辑 `pg_dump`，再在全新的 18.4 卷中恢复并校验。原 `APP_SECRET` 也必须同步保留，否则站点访问令牌无法解密。
+PostgreSQL 18 官方镜像的默认 `PGDATA` 为 `/var/lib/postgresql/18/docker`，Compose 因此把新卷 `apihub-postgres-18-data` 挂载到 `/var/lib/postgresql`。不能把旧 `apihub-postgres-data` 物理卷直接挂给 18；升级前必须先从旧实例执行逻辑 `pg_dump`，再在全新的 18 卷中恢复并校验。原 `APP_SECRET` 也必须同步保留，否则站点访问令牌无法解密。

@@ -89,12 +89,12 @@ jobs:
         run: node --test extension.test.cjs
 
   postgres:
-    name: PostgreSQL 18.4 integration
+    name: PostgreSQL 18 integration
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     services:
       postgres:
-        image: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+        image: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
         env:
           POSTGRES_DB: apihub_test
           POSTGRES_USER: apihub
@@ -346,7 +346,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: image
-          image-ref: postgres:18.4-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
+          image-ref: postgres:18-alpine@sha256:9a8afca54e7861fd90fab5fdf4c42477a6b1cb7d293595148e674e0a3181de15
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
@@ -449,7 +449,7 @@ jobs:
           TRIVY_PLATFORM: linux/amd64
         with:
           scan-type: image
-          input: /tmp/apihub-go-${{ github.sha }}.tar
+          input: /tmp/apihub-go-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL
@@ -465,7 +465,7 @@ jobs:
           TRIVY_PLATFORM: linux/arm64
         with:
           scan-type: image
-          input: /tmp/apihub-go-${{ github.sha }}.tar
+          input: /tmp/apihub-go-${{ github.sha }}.layout
           scanners: vuln,secret
           trivyignores: .trivyignore.yaml
           severity: HIGH,CRITICAL

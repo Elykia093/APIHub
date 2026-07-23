@@ -52,7 +52,7 @@ APIHub/
 ├── companion-extension/         Chrome 浏览器伴侣
 ├── docs/                        产品、API、数据库与伴侣契约
 ├── Dockerfile                   Go + Vue 多阶段生产镜像
-└── docker-compose.yml           Go 服务与 PostgreSQL 18.4
+└── docker-compose.yml           Go 服务与 PostgreSQL 18
 ```
 
 生成物规则：

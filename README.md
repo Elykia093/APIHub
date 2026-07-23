@@ -16,7 +16,7 @@
 
 ## 架构
 
-- `server/`：Go 1.26.5、Gin、Ent、pgx，唯一验证目标为 PostgreSQL 18.4 Alpine；较低版本不作为兼容目标。启动只执行项目自己的 v1/v2/v3 前向迁移，不启用 Ent 自动建表。
+- `server/`：Go 1.26.5、Gin、Ent、pgx，唯一验证目标为 PostgreSQL 18 Alpine；较低版本不作为兼容目标。启动只执行项目自己的 v1/v2/v3 前向迁移，不启用 Ent 自动建表。
 - `web/`：Vue 3、Vite、TypeScript；生产产物通过 `go:embed` 编入同一个 Go 二进制。
 - `androidApp/`：Kotlin 2.4.0、Compose Multiplatform 1.11.1、Miuix 0.9.3；Miuix 0.9.3 AAR metadata 声明 `minCompileSdk=37`，因此为保证可构建性使用 `compileSdk 37`，应用仍保持 `minSdk 26`、`targetSdk 36`。这不是按原计划完全采用 `compileSdk 36`。
 - Go 是唯一后端实现，Vue 构建仍使用 Node.js 24 工具链，但仓库不再包含 Node 后端或 Node rollback 镜像。
@@ -44,7 +44,7 @@ Copy-Item .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-启动 Go 服务与 PostgreSQL 18.4：
+启动 Go 服务与 PostgreSQL 18：
 
 ```powershell
 docker compose up -d --build
@@ -63,7 +63,7 @@ docker compose logs -f apihub
 
 ## 本地开发
 
-后端需要 Go 1.26.5，Web 需要 Node.js 24，数据库以 PostgreSQL 18.4 为唯一验证目标。可先只启动 Compose 中的数据库：
+后端需要 Go 1.26.5，Web 需要 Node.js 24，数据库以 PostgreSQL 18 为唯一验证目标。可先只启动 Compose 中的数据库：
 
 ```powershell
 Copy-Item .env.example .env
@@ -190,7 +190,7 @@ APIHub 采用[语义化版本 2.0.0（SemVer）](https://semver.org/lang/zh-CN/)
 
 ### Go 发布与回滚
 
-Go 是唯一后端实现。发布前必须通过 Go、Vue、Android、PostgreSQL 18.4 集成、容器压力、SIGTERM、依赖扫描和双架构 OCI 门禁，并备份 PostgreSQL 与 `APP_SECRET`。
+Go 是唯一后端实现。发布前必须通过 Go、Vue、Android、PostgreSQL 18 集成、容器压力、SIGTERM、依赖扫描和双架构 OCI 门禁，并备份 PostgreSQL 与 `APP_SECRET`。
 
 生产部署必须使用已验证的不可变镜像 digest，而不是重新构建或使用可变 tag：
 
@@ -235,7 +235,7 @@ cd server
 go test -tags=integration -v ./internal/service
 ```
 
-它覆盖空库、v1→v2→v3→v4、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 18.4、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 Go OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
+它覆盖空库、v1→v2→v3→v4、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 18、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 Go OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
 
 ## 目录
 
@@ -247,7 +247,7 @@ androidApp/         Kotlin + Compose + Miuix Android 客户端
 docs/               产品边界、API 契约和 PostgreSQL 说明
 .github/workflows/  全栈、真实 PostgreSQL、Android 与 OCI 门禁
 Dockerfile          Go + Vue 多阶段生产镜像
-docker-compose.yml  Go 服务与 PostgreSQL 18.4
+docker-compose.yml  Go 服务与 PostgreSQL 18
 ```
 
 更完整的产品边界与接口定义见 `docs/product-brief.md` 和 `docs/api-contract.md`。
