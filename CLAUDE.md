@@ -52,7 +52,7 @@ APIHub/
 ├── companion-extension/         Chrome 浏览器伴侣
 ├── docs/                        产品、API、数据库与伴侣契约
 ├── Dockerfile                   Go + Vue 多阶段生产镜像
-└── docker-compose.yml           Go 服务与 PostgreSQL 18
+└── docker-compose.yml           Go 服务与 PostgreSQL 18.4
 ```
 
 生成物规则：
@@ -129,7 +129,7 @@ MainActivity
 
 数据库变更是高风险改动，默认遵循“影响面 -> dry-run -> 备份/回滚 -> 写入 -> 后验复核”。生产写入、恢复、密码轮换、删除卷和发布必须另行确认。
 
-- 迁移只前向追加。已经发布的 v1/v2/v3 SQL 及其空白字节不可修改，否则 checksum 漂移会阻止启动。
+- 迁移只前向追加。已经发布的 v1/v2/v3/v4 SQL 及其空白字节不可修改，否则 checksum 漂移会阻止启动。
 - 每个新版本只允许追加到 `server/internal/migrate/migrate.go`，不得修改已发布 SQL 的 UTF-8 字节。
 - 同步更新 `server/internal/testdata/compatibility-vectors.json` 中的版本、SHA-256 和字节数，并让 Go 迁移测试通过。
 - 启动迁移必须继续在事务与 PostgreSQL advisory transaction lock 内执行；未知版本、checksum 不匹配或执行失败必须阻止启动。

@@ -23,6 +23,8 @@ test('pairs, revokes, and creates a browser companion task', async ({ page }) =>
     }
     if (path === '/api/v1/summary') return json(200, { sites: { total: 2, enabled: 2 }, today: {}, unreadAnnouncements: 0 });
     if (path === '/api/v1/sites') return json(200, { data: sites });
+    if (path === '/api/v1/checkin-runs') return json(200, { data: [] });
+    if (path === '/api/v1/announcements') return json(200, { data: [] });
     if (path === '/api/v1/companion-devices') return json(200, { data: [{ id: 'device-1', name: 'Chrome', createdAt: timestamp, lastSeenAt: timestamp, revokedAt }] });
     if (path === '/api/v1/browser-tasks') return json(200, { data: tasks });
     if (path === '/api/v1/companion-pairing-codes' && request.method() === 'POST') return json(201, { data: { code: 'ABCDEF0123456789ABCDEF01', expiresAt: '2026-07-22T08:05:00.000Z' } });
