@@ -17,6 +17,10 @@ export type SiteWrite = {
   checkinCron: string; announcementCron: string; timezone: string;
 };
 
+export type SiteImportSummary = { total: number; ready: number; created: number; skipped: number; duplicates: number; unsupported: number; invalid: number };
+export type SiteImportItem = { index: number; name: string; baseUrl: string; siteType: string; adapter?: AdapterName; status: 'ready' | 'created' | 'skipped'; reasonCode?: string; reason?: string };
+export type SiteImportResult = { source: 'all-api-hub'; sourceVersion: string; dryRun: boolean; summary: SiteImportSummary; items: SiteImportItem[] };
+
 export type CheckinStatus = 'running' | 'success' | 'already_checked' | 'manual_required' | 'failed' | 'skipped';
 export type CheckinRun = { id: string; siteId: string; siteName?: string; localDate: string; status: CheckinStatus; rewardValue: number | null; message: string; errorCode: string | null; attemptCount: number; startedAt: string; finishedAt: string | null; requestId: string };
 export type Announcement = { id: string; siteId: string; siteName?: string; source: 'status' | 'notice'; fingerprint: string; content: string; kind: string; extra: string | null; publishedAt: string | null; firstSeenAt: string; lastSeenAt: string; readAt: string | null };

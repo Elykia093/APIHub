@@ -5,6 +5,7 @@ package service
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -19,6 +20,7 @@ import (
 	entsql "entgo.io/ent/dialect/sql"
 	"github.com/elykia/apihub/server/ent"
 	"github.com/elykia/apihub/server/ent/announcement"
+	entsite "github.com/elykia/apihub/server/ent/site"
 	"github.com/elykia/apihub/server/internal/adapter"
 	"github.com/elykia/apihub/server/internal/apperror"
 	"github.com/elykia/apihub/server/internal/cryptoutil"
@@ -172,6 +174,90 @@ func TestPostgresCompanionConcurrentClaims(t *testing.T) {
 			claimedIDs[result.claim.Task.ID] = true
 		case <-time.After(5 * time.Second):
 			t.Fatal("concurrent companion claims timed out")
+		}
+	}
+}
+
+func TestPostgresAllAPIHubImport(t *testing.T) {
+	db, _ := integrationSchema(t)
+	if err := migrate.Run(context.Background(), db); err != nil {
+		t.Fatal(err)
+	}
+	client := ent.NewClient(ent.Driver(entsql.OpenDB(dialect.Postgres, db)))
+	t.Cleanup(func() { _ = client.Close() })
+	vault := cryptoutil.NewVault("integration-import-app-secret-with-32-characters")
+	fake := &integrationAdapter{}
+	registry := adapter.NewRegistry(vault, fake)
+	httpClient := netclient.New(netclient.Options{Timeout: time.Second, MaxResponseBytes: 64 * 1024})
+	t.Cleanup(httpClient.Close)
+	sites := NewSiteService(client, registry, adapter.NewDetector(httpClient), vault, false, false)
+
+	backup := json.RawMessage(`{"version":"2.0","timestamp":1710000000000,"accounts":{"accounts":[
+    {"site_name":"Imported first","site_url":"https://import-first.example","site_type":"new-api","account_info":{"id":"17","access_token":"import-token-one"}},
+    {"site_name":"Duplicate URL","site_url":"https://import-first.example/","site_type":"new-api","account_info":{"id":"18","access_token":"import-token-two"}},
+    {"site_name":"Unsupported","site_url":"https://unsupported.example","site_type":"unknown","account_info":{"id":"19","access_token":"import-token-three"}}
+  ]}}`)
+	preview, err := sites.ImportAllAPIHub(context.Background(), backup, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !preview.DryRun || preview.Summary.Ready != 1 || preview.Summary.Duplicates != 1 || preview.Summary.Unsupported != 1 {
+		t.Fatalf("unexpected import preview: %+v", preview.Summary)
+	}
+	if count, err := client.Site.Query().Count(context.Background()); err != nil || count != 0 {
+		t.Fatalf("dry-run site count = %d, err=%v; want zero", count, err)
+	}
+
+	applied, err := sites.ImportAllAPIHub(context.Background(), backup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if applied.Summary.Created != 1 || applied.Items[0].Status != importStatusCreated {
+		t.Fatalf("unexpected applied import: %+v", applied)
+	}
+	entity, err := client.Site.Query().Where(entsite.BaseURLEQ("https://import-first.example")).Only(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := vault.Decrypt(entity.AccessTokenCiphertext)
+	if err != nil || plaintext != "import-token-one" {
+		t.Fatalf("imported token decryption = %q, err=%v", plaintext, err)
+	}
+	repeated, err := sites.ImportAllAPIHub(context.Background(), backup, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.Summary.Created != 0 || repeated.Summary.Duplicates != 2 {
+		t.Fatalf("repeated import summary = %+v; want no writes and two duplicates", repeated.Summary)
+	}
+
+	if _, err := db.Exec(`
+      CREATE FUNCTION fail_second_site_import() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN
+        IF NEW.name = 'Rollback second' THEN
+          RAISE EXCEPTION 'forced import failure';
+        END IF;
+        RETURN NEW;
+      END
+      $$`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+      CREATE TRIGGER fail_second_site_import
+      BEFORE INSERT ON sites
+      FOR EACH ROW EXECUTE FUNCTION fail_second_site_import()`); err != nil {
+		t.Fatal(err)
+	}
+	rollbackBackup := json.RawMessage(`{"version":"2.0","timestamp":1710000000000,"accounts":{"accounts":[
+    {"site_name":"Rollback first","site_url":"https://rollback-first.example","site_type":"new-api","account_info":{"id":"21","access_token":"rollback-token-one"}},
+    {"site_name":"Rollback second","site_url":"https://rollback-second.example","site_type":"new-api","account_info":{"id":"22","access_token":"rollback-token-two"}}
+  ]}}`)
+	if _, err := sites.ImportAllAPIHub(context.Background(), rollbackBackup, false); err == nil {
+		t.Fatal("rollback import unexpectedly succeeded")
+	}
+	for _, baseURL := range []string{"https://rollback-first.example", "https://rollback-second.example"} {
+		if count, err := client.Site.Query().Where(entsite.BaseURLEQ(baseURL)).Count(context.Background()); err != nil || count != 0 {
+			t.Fatalf("rollback site %s count = %d, err=%v; want zero", baseURL, count, err)
 		}
 	}
 }

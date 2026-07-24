@@ -20,6 +20,7 @@ const routeTitles: Record<string, string> = {
   checkins: '签到记录',
   overview: '仪表盘',
   'site-edit': '编辑站点',
+  'site-import': '导入站点',
   'site-new': '添加站点',
   sites: '站点管理',
 };

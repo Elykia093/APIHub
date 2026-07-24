@@ -2,6 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { RouterLink } from 'vue-router';
 import { api, APIError } from '@/api';
+import AppIcon from '@/components/AppIcon.vue';
 import PageState from '@/components/PageState.vue';
 import StatusTag from '@/components/StatusTag.vue';
 import { useAsyncData } from '@/composables/useAsyncData';
@@ -19,12 +20,27 @@ onMounted(load);
         <p class="eyebrow">
           Sites
         </p><h1>站点与运行能力</h1><p>令牌不会回显；修改站点时留空即可保持原值。</p>
-      </div><RouterLink
-        class="button primary"
-        to="/sites/new"
-      >
-        添加站点
-      </RouterLink>
+      </div><div class="page-actions">
+        <RouterLink
+          class="button secondary"
+          to="/sites/import"
+        >
+          <AppIcon
+            name="upload"
+            :size="16"
+          />
+          导入备份
+        </RouterLink><RouterLink
+          class="button primary"
+          to="/sites/new"
+        >
+          <AppIcon
+            name="plus"
+            :size="16"
+          />
+          添加站点
+        </RouterLink>
+      </div>
     </header><p
       v-if="actionError"
       class="form-error banner"
@@ -44,6 +60,10 @@ onMounted(load);
         class="button primary"
         to="/sites/new"
       >
+        <AppIcon
+          name="plus"
+          :size="16"
+        />
         添加站点
       </RouterLink><template #content>
         <section class="site-grid">

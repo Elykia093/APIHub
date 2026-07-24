@@ -45,7 +45,12 @@ type handler struct{ dependencies Dependencies }
 
 var bearerAuthorization = regexp.MustCompile(`(?i)^Bearer\s+(.+)$`)
 var canonicalUUID = regexp.MustCompile(`(?i)^(?:00000000-0000-0000-0000-000000000000|[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$`)
-var dedicatedRateLimitRoute = regexp.MustCompile(`^/api/v1/sites/[^/]+/(?:checkin-runs|announcement-syncs)$`)
+var dedicatedRateLimitRoute = regexp.MustCompile(`^/api/v1/(?:sites/[^/]+/(?:checkin-runs|announcement-syncs)|site-imports)$`)
+
+const (
+	defaultJSONBodyLimit = 64 * 1024
+	siteImportBodyLimit  = 4 * 1024 * 1024
+)
 
 func NewRouter(dependencies Dependencies) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
@@ -82,6 +87,7 @@ func NewRouter(dependencies Dependencies) *gin.Engine {
 	management.Match(readMethods, "/sites/:siteId", h.getSite)
 	management.POST("/sites", h.createSite)
 	management.PATCH("/sites/:siteId", h.patchSite)
+	management.POST("/site-imports", newLimiter(5, time.Minute).middleware(), h.importSites)
 	management.POST("/sites/:siteId/checkin-runs", newLimiter(10, time.Minute).middleware(), h.runCheckin)
 	management.Match(readMethods, "/checkin-runs", h.listCheckins)
 	management.POST("/sites/:siteId/announcement-syncs", newLimiter(20, time.Minute).middleware(), h.syncAnnouncements)
@@ -266,6 +272,43 @@ func (h *handler) patchSite(c *gin.Context) {
 }
 func (r patchSiteRequest) empty() bool {
 	return r.Name == nil && r.BaseURL == nil && r.Adapter == nil && r.UserID == nil && r.AccessToken == nil && r.Enabled == nil && r.CheckinEnabled == nil && r.AnnouncementEnabled == nil && r.CheckinCron == nil && r.AnnouncementCron == nil && r.Timezone == nil
+}
+
+type siteImportRequest struct {
+	Source string          `json:"source"`
+	DryRun *bool           `json:"dryRun"`
+	Backup json.RawMessage `json:"backup"`
+}
+
+func (h *handler) importSites(c *gin.Context) {
+	var request siteImportRequest
+	if !h.decodeWithLimit(c, &request, siteImportBodyLimit, "source", "dryRun", "backup") {
+		return
+	}
+	if request.Source != "all-api-hub" {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "source must be all-api-hub", false))
+		return
+	}
+	if request.DryRun == nil {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "dryRun is required", false))
+		return
+	}
+	if len(request.Backup) == 0 {
+		h.fail(c, apperror.New(422, apperror.ValidationError, "backup is required", false))
+		return
+	}
+	result, err := h.dependencies.Sites.ImportAllAPIHub(c.Request.Context(), request.Backup, *request.DryRun)
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	if !*request.DryRun && result.Summary.Created > 0 {
+		if err := h.dependencies.Scheduler.Reload(c.Request.Context()); err != nil {
+			h.fail(c, err)
+			return
+		}
+	}
+	c.JSON(200, gin.H{"data": result})
 }
 
 func (h *handler) runCheckin(c *gin.Context) {
@@ -555,12 +598,16 @@ func (h *handler) finishBrowserTask(c *gin.Context) {
 }
 
 func (h *handler) decode(c *gin.Context, target any, allowedFields ...string) bool {
+	return h.decodeWithLimit(c, target, defaultJSONBodyLimit, allowedFields...)
+}
+
+func (h *handler) decodeWithLimit(c *gin.Context, target any, limit int64, allowedFields ...string) bool {
 	media, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
 	if err != nil || !strings.EqualFold(media, "application/json") {
 		h.fail(c, apperror.New(415, apperror.UnsupportedMediaType, "Unsupported request media type", false))
 		return false
 	}
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 64*1024)
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, limit)
 	payload, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		var maxErr *http.MaxBytesError

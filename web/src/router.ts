@@ -7,6 +7,7 @@ const router = createRouter({
     { path: '/connect', name: 'connect', component: () => import('./views/ConnectView.vue'), meta: { public: true } },
     { path: '/', name: 'overview', component: () => import('./views/OverviewView.vue') },
     { path: '/sites', name: 'sites', component: () => import('./views/SitesView.vue') },
+    { path: '/sites/import', name: 'site-import', component: () => import('./views/SiteImportView.vue') },
     { path: '/sites/new', name: 'site-new', component: () => import('./views/SiteEditorView.vue') },
     { path: '/sites/:id/edit', name: 'site-edit', component: () => import('./views/SiteEditorView.vue') },
     { path: '/checkins', name: 'checkins', component: () => import('./views/CheckinsView.vue') },

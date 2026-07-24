@@ -90,6 +90,67 @@
       "timezone": "Asia/Shanghai"
     }
 
+### All API Hub 站点导入
+
+- `POST /api/v1/site-imports`：预览或应用 `qixing-jk/all-api-hub` 的 JSON 备份；管理认证与 `Cache-Control: no-store` 规则不变。
+- 请求正文上限为 4 MiB，最多读取 100 个账号。外层仅接受 `source`、`dryRun`、`backup`；`backup` 内未知字段为兼容上游演进而忽略。
+- `source` 当前只接受 `all-api-hub`；`dryRun` 必填。`backup` 必须是对象，支持缺省/`1.0` 的旧结构和 `2.0`，要求存在 `timestamp`，账号数组可位于 `accounts`、`accounts.accounts` 或旧版 `data.accounts`。
+
+请求：
+
+    {
+      "source": "all-api-hub",
+      "dryRun": true,
+      "backup": {
+        "version": "2.0",
+        "timestamp": 1710000000000,
+        "accounts": {
+          "accounts": []
+        }
+      }
+    }
+
+导入只消费站点账号字段；偏好、标签、书签、渠道配置、API 凭据配置、Cookie、刷新令牌和历史数据均忽略。`account_info.access_token` 会按当前 `APP_SECRET` 重新加密后写入，响应、日志和错误不回显明文或密文。
+
+映射与跳过规则：
+
+- 上游明确属于 New API family 的 `one-api | new-api | anyrouter | Veloera | one-hub | done-hub | v-api | VoAPI | Super-API | Rix-Api | neo-Api | wong-gongyi` 映射为 `new-api`。
+- `sub2api` 映射为 `sub2api`；其他站点类型保持逐项 `UNSUPPORTED_SITE_TYPE`，不使用网络探测猜测。
+- `authType: cookie`、缺少访问令牌、New API family 缺少用户 ID、字段或 URL 非法的账号逐项跳过。
+- URL 经过与普通站点创建相同的协议、私网和规范化校验。同一备份中规范化 URL 重复时保留第一项；数据库已存在相同 `baseUrl` 时按 `ALREADY_EXISTS` 跳过，因此重复应用同一备份不会重复创建。
+- `disabled` 映射为站点 `enabled` 的反值；自动签到仅在上游 `checkIn.enableDetection` 为 `true` 且 `autoCheckInEnabled` 未显式关闭时启用。公告同步按目标适配器能力启用。计划与时区使用普通创建接口的默认值。
+
+响应不包含任何令牌：
+
+    {
+      "data": {
+        "source": "all-api-hub",
+        "sourceVersion": "2.0",
+        "dryRun": true,
+        "summary": {
+          "total": 2,
+          "ready": 1,
+          "created": 0,
+          "skipped": 1,
+          "duplicates": 1,
+          "unsupported": 0,
+          "invalid": 0
+        },
+        "items": [
+          {
+            "index": 0,
+            "name": "示例公益站",
+            "baseUrl": "https://example.com",
+            "siteType": "new-api",
+            "adapter": "new-api",
+            "status": "ready"
+          }
+        ]
+      }
+    }
+
+`dryRun: true` 零写入。`dryRun: false` 会在单一数据库事务内创建所有 `ready` 项，任一写入失败则整体回滚，成功后统一重载调度器；导入过程中不发起上游 HTTP 请求。并发创建导致唯一约束冲突时返回 `409 CONFLICT`，客户端应重新 dry-run。格式错误、未知版本、缺少账号数组或超过 100 个账号返回 `422 VALIDATION_ERROR`。
+
 ### 签到任务
 
 - `POST /api/v1/sites/{siteId}/checkin-runs`：手动创建/重试当天签到任务。

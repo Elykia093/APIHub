@@ -68,20 +68,38 @@ func (s *SiteService) Get(ctx context.Context, id string) (SiteView, error) {
 }
 
 func (s *SiteService) Create(ctx context.Context, input CreateSiteInput) (SiteView, error) {
-	if err := validateSiteStrings(input.Name, input.UserID, input.AccessToken); err != nil {
+	prepared, err := s.prepareSiteCreate(ctx, input)
+	if err != nil {
 		return SiteView{}, err
+	}
+	created, err := s.createPreparedSite(ctx, s.client, prepared)
+	if err != nil {
+		return SiteView{}, err
+	}
+	return s.view(created)
+}
+
+type preparedSiteCreate struct {
+	name, baseURL, userID, accessToken, checkinCron, announcementCron, timezone string
+	adapter                                                                     domain.AdapterName
+	enabled, checkinEnabled, announcementEnabled                                bool
+}
+
+func (s *SiteService) prepareSiteCreate(ctx context.Context, input CreateSiteInput) (preparedSiteCreate, error) {
+	if err := validateSiteStrings(input.Name, input.UserID, input.AccessToken); err != nil {
+		return preparedSiteCreate{}, err
 	}
 	baseURL, err := netclient.NormalizeBaseURL(input.BaseURL, s.allowInsecure, s.allowPrivate)
 	if err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	name, err := s.resolveAdapter(ctx, input.Adapter, baseURL)
 	if err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	descriptor, err := s.descriptor(name)
 	if err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	checkinEnabled := descriptor.Capabilities.Checkin
 	if input.CheckinEnabled != nil {
@@ -92,28 +110,44 @@ func (s *SiteService) Create(ctx context.Context, input CreateSiteInput) (SiteVi
 		announcementEnabled = *input.AnnouncementEnabled
 	}
 	if err := validateAdapterConfiguration(descriptor, input.UserID, checkinEnabled, announcementEnabled); err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	timezone, err := normalizedTimezone(input.Timezone)
 	if err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	if err := validateSchedule(input.CheckinCron, timezone); err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
 	if err := validateSchedule(input.AnnouncementCron, timezone); err != nil {
-		return SiteView{}, err
+		return preparedSiteCreate{}, err
 	}
-	ciphertext, err := s.vault.Encrypt(input.AccessToken)
+	return preparedSiteCreate{
+		name:                strings.TrimSpace(input.Name),
+		baseURL:             baseURL,
+		adapter:             name,
+		userID:              strings.TrimSpace(input.UserID),
+		accessToken:         input.AccessToken,
+		enabled:             input.Enabled,
+		checkinEnabled:      checkinEnabled,
+		announcementEnabled: announcementEnabled,
+		checkinCron:         strings.TrimSpace(input.CheckinCron),
+		announcementCron:    strings.TrimSpace(input.AnnouncementCron),
+		timezone:            timezone,
+	}, nil
+}
+
+func (s *SiteService) createPreparedSite(ctx context.Context, client *ent.Client, input preparedSiteCreate) (*ent.Site, error) {
+	ciphertext, err := s.vault.Encrypt(input.accessToken)
 	if err != nil {
-		return SiteView{}, fmt.Errorf("encrypt site credential: %w", err)
+		return nil, fmt.Errorf("encrypt site credential: %w", err)
 	}
 	now := time.Now().UTC()
-	created, err := s.client.Site.Create().SetID(uuid.NewString()).SetName(strings.TrimSpace(input.Name)).SetBaseURL(baseURL).SetAdapter(entsite.Adapter(name)).SetUserID(strings.TrimSpace(input.UserID)).SetAccessTokenCiphertext(ciphertext).SetEnabled(input.Enabled).SetCheckinEnabled(checkinEnabled).SetAnnouncementEnabled(announcementEnabled).SetCheckinCron(strings.TrimSpace(input.CheckinCron)).SetAnnouncementCron(strings.TrimSpace(input.AnnouncementCron)).SetTimezone(timezone).SetConsecutiveFailures(0).SetCreatedAt(now).SetUpdatedAt(now).Save(ctx)
+	created, err := client.Site.Create().SetID(uuid.NewString()).SetName(input.name).SetBaseURL(input.baseURL).SetAdapter(entsite.Adapter(input.adapter)).SetUserID(input.userID).SetAccessTokenCiphertext(ciphertext).SetEnabled(input.enabled).SetCheckinEnabled(input.checkinEnabled).SetAnnouncementEnabled(input.announcementEnabled).SetCheckinCron(input.checkinCron).SetAnnouncementCron(input.announcementCron).SetTimezone(input.timezone).SetConsecutiveFailures(0).SetCreatedAt(now).SetUpdatedAt(now).Save(ctx)
 	if err != nil {
-		return SiteView{}, normalizeWriteError(err)
+		return nil, normalizeWriteError(err)
 	}
-	return s.view(created)
+	return created, nil
 }
 
 func (s *SiteService) Patch(ctx context.Context, id string, input PatchSiteInput) (SiteView, error) {
