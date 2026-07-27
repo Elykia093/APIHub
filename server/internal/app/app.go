@@ -67,6 +67,7 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger, web fs.F
 	registry := adapter.NewRegistry(vault, adapter.NewNewAPI(httpClient), adapter.NewSub2API(httpClient), adapter.NewZenAPI(httpClient))
 	detector := adapter.NewDetector(httpClient)
 	sites := service.NewSiteService(client, registry, detector, vault, cfg.AllowPrivateSites, cfg.AllowInsecureHTTP)
+	companion := service.NewCompanionService(db)
 	checkins := service.NewCheckinService(client, registry, logger)
 	announcements := service.NewAnnouncementService(client, registry, logger)
 	scheduler := service.NewScheduler(ctx, client, checkins, announcements, logger)
@@ -77,7 +78,7 @@ func Build(ctx context.Context, cfg config.Config, logger *slog.Logger, web fs.F
 		}
 		return nil, err
 	}
-	router := api.NewRouter(api.Dependencies{Config: cfg, DB: db, Sites: sites, Checkins: checkins, Announcements: announcements, Scheduler: scheduler, Adapters: registry, Logger: logger, Web: web})
+	router := api.NewRouter(api.Dependencies{Config: cfg, DB: db, Sites: sites, Checkins: checkins, Announcements: announcements, Companion: companion, Scheduler: scheduler, Adapters: registry, Logger: logger, Web: web})
 	server := &http.Server{Addr: cfg.Address(), Handler: router, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 30 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	return &Runtime{Server: server, DB: db, Ent: client, Scheduler: scheduler, HTTP: httpClient}, nil
 }

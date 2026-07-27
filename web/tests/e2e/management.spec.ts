@@ -91,3 +91,46 @@ test('manages a site, check-in, and announcement through the browser', async ({ 
   expect(writes[0]).toMatchObject({ accessToken: 'station-token', enabled: true, checkinEnabled: true, announcementEnabled: true });
   expect(writes[1]).not.toHaveProperty('accessToken');
 });
+
+test('previews and applies an All API Hub backup without exposing its token', async ({ page }) => {
+  const adminToken = 'test-admin-token-1234567890';
+  const secret = 'e2e-backup-token-must-not-render';
+  let importRequest: Record<string, unknown> | undefined;
+  const importedSite = { id:'imported-site', name:'导入站点', baseUrl:'https://imported.example', adapter:'new-api', userId:'7', enabled:true, checkinEnabled:true, announcementEnabled:true, checkinCron:'15 8 * * *', announcementCron:'*/30 * * * *', timezone:'Asia/Shanghai', credentialConfigured:true, consecutiveFailures:0, capabilities:{ checkin:true, announcements:true, requiresUserId:true }, createdAt:'2026-07-18T00:00:00Z', updatedAt:'2026-07-18T00:00:00Z' };
+
+  await page.route('**/api/v1/**', async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    if (request.headers().authorization !== `Bearer ${adminToken}`) {
+      return route.fulfill({ status:401, contentType:'application/json', body:JSON.stringify({ error:{ code:'AUTH_REQUIRED', message:'Unauthorized', retryable:false, requestId:'e2e-import' } }) });
+    }
+    const json = (status:number, body:unknown) => route.fulfill({ status, contentType:'application/json', body:JSON.stringify(body) });
+    if (url.pathname === '/api/v1/summary') return json(200, { sites:{ total:importRequest ? 1 : 0, enabled:importRequest ? 1 : 0 }, today:{}, unreadAnnouncements:0 });
+    if (url.pathname === '/api/v1/sites' && request.method() === 'GET') return json(200, { data:importRequest ? [importedSite] : [] });
+    if (url.pathname === '/api/v1/site-imports' && request.method() === 'POST') {
+      importRequest = request.postDataJSON() as Record<string, unknown>;
+      const dryRun = importRequest.dryRun === true;
+      return json(200, { data:{ source:'all-api-hub', sourceVersion:'2.0', dryRun, summary:{ total:1, ready:dryRun ? 1 : 0, created:dryRun ? 0 : 1, skipped:0, duplicates:0, unsupported:0, invalid:0 }, items:[{ index:0, name:'导入站点', baseUrl:'https://imported.example', siteType:'new-api', adapter:'new-api', status:dryRun ? 'ready' : 'created' }] } });
+    }
+    return json(404, { error:{ code:'NOT_FOUND', message:'Not found', retryable:false, requestId:'e2e-import' } });
+  });
+
+  await page.goto('/connect');
+  await page.getByLabel('管理员令牌').fill(adminToken);
+  await page.getByRole('button', { name:'连接服务器' }).click();
+  await page.getByRole('link', { name:'站点管理' }).click();
+  await page.getByRole('link', { name:'导入备份' }).click();
+  await page.locator('input[type="file"]').setInputFiles({
+    name:'all-api-hub-backup.json',
+    mimeType:'application/json',
+    buffer:Buffer.from(JSON.stringify({ version:'2.0', timestamp:1710000000000, accounts:{ accounts:[{ site_name:'导入站点', site_url:'https://imported.example', site_type:'new-api', account_info:{ id:'7', access_token:secret } }] } })),
+  });
+  await page.getByRole('button', { name:'预览导入' }).click();
+  await expect(page.getByRole('heading', { name:'导入预览' })).toBeVisible();
+  await expect(page.getByRole('cell', { name:'导入站点' })).toBeVisible();
+  await expect(page.getByText(secret)).toHaveCount(0);
+  await page.getByRole('button', { name:'导入 1 个站点' }).click();
+  await expect(page.getByRole('heading', { name:'导入完成' })).toBeVisible();
+  expect(importRequest).toMatchObject({ source:'all-api-hub', dryRun:false, backup:{ version:'2.0' } });
+  expect(JSON.stringify(importRequest)).toContain(secret);
+});

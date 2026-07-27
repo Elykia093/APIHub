@@ -9,16 +9,18 @@
 - 手动/定时签到，同站点同自然日由 PostgreSQL 唯一约束保证幂等。
 - 聚合 `/api/status` 结构化公告与 `/api/notice` 文本通知，按正文指纹去重。
 - AES-256-GCM 加密保存站点访问令牌，管理 API 不回显明文或密文。
+- 可从 All API Hub 备份导入站点：先 dry-run 预览，确认后在单一事务中写入，重复站点自动跳过。
 - 遇到 Turnstile、验证码或二次验证时标记“需人工处理”，不尝试绕过。
+- 可选浏览器伴侣在用户自己的 Chrome 会话中执行页面签到和 OAuth/验证接力；服务端不接收浏览器凭据。
 - 自带中文管理页、健康检查、请求限流和 Docker Compose 部署文件。
 - 提供 Android 管理客户端；定时签到仍只在服务器执行。
 
-## 架构与迁移状态
+## 架构
 
-- `server/`：Go 1.26.5、Gin、Ent、pgx，仅支持 PostgreSQL 17；启动只执行项目自己的 v1/v2 前向迁移，不启用 Ent 自动建表。
+- `server/`：Go 1.26.5、Gin、Ent、pgx，唯一验证目标为 PostgreSQL 18.4 Alpine；较低版本不作为兼容目标。启动只执行项目自己的 v1/v2/v3/v4 前向迁移，不启用 Ent 自动建表。
 - `web/`：Vue 3、Vite、TypeScript；生产产物通过 `go:embed` 编入同一个 Go 二进制。
 - `androidApp/`：Kotlin 2.4.0、Compose Multiplatform 1.11.1、Miuix 0.9.3；Miuix 0.9.3 AAR metadata 声明 `minCompileSdk=37`，因此为保证可构建性使用 `compileSdk 37`，应用仍保持 `minSdk 26`、`targetSdk 36`。这不是按原计划完全采用 `compileSdk 36`。
-- 根目录 `src/` 与 `tests/`：原 Node 实现和兼容测试基线。迁移验收完成前保留，普通 `docker compose` 仍以 `Dockerfile.node` 为默认入口。
+- Go 是唯一后端实现，Vue 构建仍使用 Node.js 24 工具链，但仓库不再包含 Node 后端或 Node rollback 镜像。
 
 Web 与 Android 共用 `/api/v1`，不增加移动端专用接口。两端统一使用 Anheyu `brand_blue` 亮暗主题令牌。
 
@@ -43,19 +45,15 @@ Copy-Item .env.example .env
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-启动当前默认的 Node 兼容服务与 PostgreSQL 17：
+启动 Go 服务与 PostgreSQL 18.4：
 
 ```powershell
 docker compose up -d --build
 ```
 
-Go 实现当前是 candidate，必须显式叠加 override 才会启动：
+`.env.example` 预置 DaoCloud/NJU 镜像路径、npm 镜像和 `goproxy.cn`，同时保留固定 digest。无法访问这些加速源时，可删除 `POSTGRES_IMAGE`、`NODE_BUILD_IMAGE`、`GO_BUILD_IMAGE`、`RUNTIME_IMAGE`、`NPM_REGISTRY`、`GOPROXY` 六行，Compose 会回退到 Dockerfile 和 Compose 的官方源。
 
-```powershell
-docker compose -f docker-compose.yml -f docker-compose.go.yml up -d --build
-```
-
-该命令用于迁移验证，不代表已经完成生产切换。契约差分、真实 PostgreSQL、容器压力与退出、安全扫描、双架构 OCI/SBOM/provenance 证据全部通过前，生产入口必须继续使用 Node。
+如果 Docker 主机内存低于 1 GiB，可额外设置 `GO_BUILD_GOMAXPROCS=1`、`GO_BUILD_GOMEMLIMIT=384MiB` 和 `GO_BUILD_FLAGS=-p=1 -tags=nomsgpack`，限制 Go 编译并发并跳过 APIHub 未使用的 Gin MessagePack 绑定；这些变量只影响构建阶段，不改变运行容器的 `GOMEMLIMIT`。
 
 访问 `http://127.0.0.1:4180`，输入 `ADMIN_TOKEN`。公网部署必须放在 HTTPS 反向代理后；Compose 不应直接暴露到公网。站点访问令牌应从对应站点的正规账号设置或登录流程中获取；New API 还需要填写用户 ID。APIHub 不接管用户名、密码、浏览器 Cookie 或 OAuth 会话。
 
@@ -66,7 +64,7 @@ docker compose logs -f apihub
 
 ## 本地开发
 
-后端需要 Go 1.26.5，Web 需要 Node.js 24，数据库需要 PostgreSQL 17。可先只启动 Compose 中的数据库：
+后端需要 Go 1.26.5，Web 需要 Node.js 24，数据库以 PostgreSQL 18.4 为唯一验证目标。可先只启动 Compose 中的数据库：
 
 ```powershell
 Copy-Item .env.example .env
@@ -83,21 +81,27 @@ go run ./cmd/apihub
 
 服务默认监听 `127.0.0.1:4180`。启动时会在 PostgreSQL 事务中自动执行尚未应用的版本迁移。Web 热更新可在 `web/` 运行 `npm run dev`。
 
-原 Node 基线和默认容器入口可单独验证：
+Android 工程以 JDK 26 为唯一验证目标，并安装 Android SDK 37 作为编译平台；`targetSdk` 仍为 36。较低 JDK 不纳入兼容目标：
 
-```powershell
-npm ci
-npm test
-npm run typecheck
-npm run build
-docker build -f Dockerfile.node -t apihub-node:compat .
-```
-
-Android 工程要求 JDK 17，并安装 Android SDK 37 作为编译平台；`targetSdk` 仍为 36：
+CI 仪器测试覆盖最低支持版本 Android API 26、Android 15 的 API 35 行为边界和当前最高验证目标 API 36；模拟器证据不替代真实厂商设备、低端机或性能验证。
 
 ```powershell
 cd androidApp
 ./gradlew.bat testDebugUnitTest lintDebug assembleRelease
+```
+
+也可以用固定摘要的 Temurin 26 + Android SDK 镜像复现完整门禁。该命令为 800 MiB 服务器限制 Gradle 和本地测试 worker 各使用 128 MiB 堆、单 worker、进程内 Kotlin 编译；镜像 init script 仅在此命令显式启用，阿里云 Maven 镜像失败时仍回退到官方仓库：
+
+`UBUNTU_MIRROR` 只替换 Ubuntu apt 源；Android SDK 默认仍从 Google 官方仓库下载，并带连接、总下载和 `sdkmanager` 超时。可信代理可通过 `ANDROID_REPOSITORY_URL` 覆盖仓库基址，但仍会校验 command-line tools 的固定 SHA-256。
+
+```powershell
+docker build --build-arg UBUNTU_MIRROR=https://mirrors.ustc.edu.cn/ubuntu -f androidApp/Dockerfile.jdk26 -t apihub/android-jdk26:26.0.1 androidApp
+docker run --rm --memory=700m --memory-swap=2g `
+  --volume "${PWD}/androidApp:/workspace" `
+  --volume apihub-android-gradle-cache:/opt/gradle-cache `
+  --workdir /workspace `
+  apihub/android-jdk26:26.0.1 `
+  bash -lc './gradlew testDebugUnitTest lintDebug assembleRelease --init-script /opt/gradle/docker-mirrors.init.gradle.kts --no-daemon --no-watch-fs --max-workers=1 -PjavaToolchainVersion=26 -Pkotlin.compiler.execution.strategy=in-process -Dorg.gradle.jvmargs="-Xmx128m -XX:+UseSerialGC -Dfile.encoding=UTF-8" --stacktrace'
 ```
 
 Release 默认拒绝明文 HTTP；仅 debug manifest 允许本地 HTTP。管理员令牌经 Android Keystore AES-GCM 加密后再写入 DataStore，DataStore 不保存明文。
@@ -119,11 +123,11 @@ Release 默认拒绝明文 HTTP；仅 debug manifest 允许本地 HTTP。管理�
 | `MAX_RESPONSE_BYTES` | `1048576` | 单个上游响应正文上限 |
 | `ALLOW_PRIVATE_SITES` | `false` | 是否允许站点解析到私网/保留地址 |
 | `ALLOW_INSECURE_HTTP` | `false` | 是否允许 HTTP 站点 |
-| `GOMEMLIMIT` | `96MiB` | 仅 Go candidate 使用；Compose 内存硬限制仍为 128 MiB |
+| `GOMEMLIMIT` | `96MiB` | Go 运行时软限制；Compose 内存硬限制仍为 128 MiB |
 
 上述变量均由 Compose 透传；`.env.example` 给出了默认值。默认只允许公网 HTTPS。只有明确需要接入内网站点时才开启私网访问；开启后应同时限制容器网络，避免把服务暴露为 SSRF 跳板。
 
-应用进程继续兼容 Node `Number()` 可接受的 `PORT` 形式；但 Docker Compose 的 `ports` 语法只接受规范十进制端口。通过 Compose 启动时，`PORT` 必须写成 `1`–`65535` 的十进制整数字符串（例如 `4180`），不能写 `1e3`、`4180.0` 或十六进制。直接运行 Node/Go 进程时不受这条 Compose 解析限制。
+Go 配置解析器继续兼容历史 `Number()` 形式；但 Docker Compose 的 `ports` 语法只接受规范十进制端口。通过 Compose 启动时，`PORT` 必须写成 `1`–`65535` 的十进制整数字符串（例如 `4180`），不能写 `1e3`、`4180.0` 或十六进制。
 
 连接池默认 5 条连接，按照当前“单实例、少量公益站、低频定时任务”假设设置。增加应用副本或大幅提高任务频率前，应先按 `副本数 × DATABASE_POOL_MAX` 复核 PostgreSQL `max_connections` 和 PgBouncer 配置。
 
@@ -136,6 +140,12 @@ Release 默认拒绝明文 HTTP；仅 debug manifest 允许本地 HTTP。管理�
 | `zen-api` | `/api/public/site-info` JSON 契约 | `/api/u/checkin` | 不支持 | 不需要 |
 
 `auto` 只用于创建或修改时的受控探测，数据库会保存识别出的具体适配器。无法可靠识别时请求失败并要求用户明确选择，不会静默回退到 New API。适配器能力可通过 `GET /api/v1/site-adapters` 查询。
+
+### All API Hub 备份导入
+
+管理页“站点管理 → 导入备份”支持上游 [qixing-jk/all-api-hub](https://github.com/qixing-jk/all-api-hub/tree/5f5b5c9db492f1a744610df1732d744ad07c22fa) 3.53.0 的 JSON 备份格式。导入只读取站点名称、地址、类型、用户 ID、访问令牌、启用状态和签到开关；Cookie、刷新令牌、偏好、标签、渠道配置和历史数据会被忽略。页面先调用 `POST /api/v1/site-imports` 的 `dryRun: true` 展示逐项映射与跳过原因，再由管理员确认应用。
+
+服务端只将明确支持的 New API family 和 `sub2api` 导入为现有适配器，其他类型逐项跳过，不发起上游探测。令牌按当前 `APP_SECRET` 重新 AES-256-GCM 加密，响应、日志和错误不包含令牌。应用阶段在单一 Ent 事务中写入，任一站点失败会整体回滚；同一备份或数据库中规范化地址重复时保持幂等。API 契约、大小/数量限制和版本兼容边界见 `docs/api-contract.md`。
 
 ### New API
 
@@ -151,7 +161,9 @@ Release 默认拒绝明文 HTTP；仅 debug manifest 允许本地 HTTP。管理�
 
 ### 浏览器能力边界
 
-参考扩展支持的 linux.do OAuth、Cookie/LocalStorage 捕获、页面按钮点击和 Cloudflare/Turnstile 页面协助依赖真实浏览器身份上下文，服务端版本不直接实现。需要这些能力的站点会保持相应操作关闭或标记为需人工处理，避免在错误账号页面上误签到。
+linux.do OAuth、页面按钮点击和 Cloudflare/Turnstile 人工验证依赖真实浏览器身份上下文，服务端不直接执行。可选的 `companion-extension/` 在用户本机 Chrome 中领取同源任务，复用当前浏览器会话执行页面按钮签到；遇到登录或人机验证时默认前置页面等待用户完成，也可在扩展弹窗关闭前置开关。扩展不申请 `cookies`、`webRequest` 或 `scripting` 权限，不读取或上传 Cookie、LocalStorage、SessionStorage、Authorization、OAuth code、验证码或页面完整正文，只回传状态、短说明和可选余额文本。
+
+使用方式：管理页进入“浏览器伴侣”生成五分钟单次配对码，在 `chrome://extensions` 以开发者模式加载 `companion-extension/`，然后在扩展弹窗填写 APIHub 地址和配对码。设备令牌只在本机扩展存储；管理员可随时撤销设备并释放其未完成任务。完整契约与安全边界见 `docs/browser-companion.md`。
 
 ## 安全边界
 
@@ -166,7 +178,7 @@ Release 默认拒绝明文 HTTP；仅 debug manifest 允许本地 HTTP。管理�
 
 ## PostgreSQL、备份与恢复
 
-Compose 将数据库持久化到 `apihub-postgres-data` 卷。应用启动时使用事务和 advisory lock 串行执行前向迁移；迁移失败会整体回滚并阻止服务启动。
+Compose 将 PostgreSQL 18.4 数据持久化到 `apihub-postgres-18-data` 卷。应用启动时使用事务和 advisory lock 串行执行前向迁移；迁移失败会整体回滚并阻止服务启动。旧 PostgreSQL 17 卷不能直接复用，必须先逻辑导出再恢复到新卷。
 
 数据库卷初始化后，单独修改 `.env` 中的 `POSTGRES_PASSWORD` 不会自动修改已有 PostgreSQL 角色密码；需要先在数据库执行受控的密码轮换，再同步更新 `POSTGRES_PASSWORD` 和使用 URL 编码密码的 `DATABASE_URL`。空库开发环境也可以删除数据卷后重新初始化，但这会永久删除卷内数据。
 
@@ -174,46 +186,38 @@ Compose 将数据库持久化到 `apihub-postgres-data` 卷。应用启动时使
 
 本项目在切换 PostgreSQL 前没有本地 SQLite 数据文件，因此仓库不包含 SQLite→PostgreSQL 数据搬迁脚本。若你之后需要导入其他实例的数据，应单独做 dry-run、行数/唯一约束校验和备份后再写入。
 
-### Go 与 Node 回滚
+### 版本策略
 
-v1/v2 SQL 字节和 checksum 在两种实现间保持一致，本轮不新增 v3。当前默认入口仍是 Node；Go 只通过 `docker-compose.go.yml` 进入 candidate 验证。切换前必须满足以下门禁：
+APIHub 采用[语义化版本 2.0.0（SemVer）](https://semver.org/lang/zh-CN/)。版本号使用 `X.Y.Z`。从 `1.0.0` 起，不兼容的公开契约变更递增主版本号，向下兼容的功能新增或废弃声明递增次版本号，向下兼容的问题修正递增修订号。`0.y.z` 表示公开契约仍处于初始开发阶段；此阶段新增功能或不兼容变更递增次版本号，兼容修复递增修订号，首个稳定契约版本为 `1.0.0`。
 
-1. Node 与 Go 对同一数据库和同一请求集的状态码、稳定响应体、内容类型及缓存语义无差异；Node 写入的加密站点必须能由 Go 实际签到，Go 更新的令牌也必须能由 Node 回滚实例实际签到。
-2. Node 基线、Go、Vue、Android、PostgreSQL 17 集成、容器压力和 SIGTERM 退出码门禁全部通过。
-3. Node rollback 与 Go candidate 都已生成 amd64/arm64 OCI、SBOM、provenance、OCI digest 和归档 SHA-256；最终上传的同一 OCI 归档已逐架构通过依赖、secret 和镜像扫描，未隐藏无修复版本的 High/Critical。
-4. 已记录旧 Node 可拉取 digest，备份 PostgreSQL 与 `APP_SECRET`，并由人工批准切换和回滚窗口。
-5. 发布到目标 registry 后，已对最终 digest 完成可信签名和身份、issuer、subject 验证；本地 OCI 归档的 BuildKit provenance 不能替代 registry 签名。
+- Git 发布标签使用 `vX.Y.Z`；先行版本可使用 `vX.Y.Z-alpha.N`、`vX.Y.Z-beta.N` 或 `vX.Y.Z-rc.N`。标签中的 `v` 不是版本号本身的一部分。
+- 同一次发布的 Git 标签、Go `VERSION`、OCI `org.opencontainers.image.version` 与 Android `versionName` 必须一致；Android `versionCode` 另行保持单调递增。
+- 源码中的版本值不等于已经发布；只有对应的不可变 Git 标签和制品完成发布后，才能声明该版本已发布。已发布的版本号和标签不可移动、覆盖或复用。
+- 公开 API、配置语义、数据库兼容性、浏览器伴侣协议或客户端契约发生变化时，必须按影响选择下一个版本并写入发布说明。
 
-生产切换必须使用已验证的不可变镜像引用，而不是重新构建或使用可变 tag：
+### Go 发布与回滚
 
-```powershell
-$env:APIHUB_GO_IMAGE = "registry.example/apihub-go@sha256:<verified-digest>"
-docker compose -f docker-compose.yml -f docker-compose.go.yml up -d --no-build --force-recreate apihub
-```
+Go 是唯一后端实现。发布前必须通过 Go、Vue、Android、PostgreSQL 18.4 集成、容器压力、SIGTERM、依赖扫描和双架构 OCI 门禁，并备份 PostgreSQL 与 `APP_SECRET`。
 
-需要回滚时移除 Go override，并使用切换前记录的 Node digest；数据库和 `APP_SECRET` 必须保持不变：
+向 `main` 上的发布提交推送 `vX.Y.Z` 或先行版本 tag 后，GitHub Actions 会在全部门禁通过后将同一份已扫描 OCI 制品发布到 `ghcr.io/elykia093/apihub`。发布镜像同时写入版本 tag 和 `sha-<commit>` tag；先行版本不会更新 `latest`。服务器只允许从 GHCR 拉取并按已验证 digest 部署，不得现场构建或重新打包。
+
+生产部署必须使用已验证的不可变镜像 digest，而不是仅依赖 tag：
 
 ```powershell
-$env:APIHUB_IMAGE = "registry.example/apihub-node@sha256:<rollback-digest>"
+$env:APIHUB_IMAGE = "ghcr.io/elykia093/apihub@sha256:<verified-digest>"
+docker compose pull apihub
 docker compose up -d --no-build --force-recreate apihub
 ```
 
-如果库内已存在 `sub2api` 或 `zen-api` 站点，回滚 Node 构建必须是理解 v2 枚举的版本。Go 稳定观察期与回滚演练完成前不得删除 `src/`、`tests/` 或 `Dockerfile.node`。
+回滚使用上一个已验证的 Go digest，数据库和 `APP_SECRET` 必须保持不变。新增迁移只能前向追加，回滚镜像必须理解当前数据库 schema；不能通过删除卷或恢复旧 `APP_SECRET` 规避兼容问题。
 
-Node 默认镜像以 `node` 用户运行，Go candidate 以 Distroless `nonroot` 用户运行；两者都使用只读根文件系统、删除全部 Linux capabilities，并把 `/tmp` 挂为 16 MiB tmpfs。Compose 限制应用为 128 MiB，Go candidate 另设 `GOMEMLIMIT=96MiB`。
-
-Dockerfile、PostgreSQL Compose、CI service 和 CI 模拟上游都固定为可读 tag 加官方 registry 多架构索引 digest。当前摘要于 2026-07-18 直接从 Docker Hub/GCR manifest API 解析；依赖升级时必须重新审查并显式更新 tag 与 digest，不能只移动 tag。
+Go 镜像以 Distroless `nonroot` 用户运行，使用只读根文件系统、删除全部 Linux capabilities、`/tmp` 16 MiB tmpfs、128 MiB 内存硬限制和 `GOMEMLIMIT=96MiB`。Dockerfile、Compose 和 CI 镜像都固定 tag 与多架构索引 digest；依赖升级时必须重新审查并显式更新 digest。
 
 数据库模型、索引和上线检查见 `docs/postgresql.md`。
 
 ## 验证
 
 ```powershell
-# 原 Node 兼容基线
-npm test
-npm run typecheck
-npm run build
-
 # Go
 cd server
 go test ./...
@@ -228,7 +232,7 @@ npm test
 npm run build
 npm run e2e
 
-# Android（JDK 17 + Android SDK）
+# Android（JDK 26 + Android SDK）
 cd ../androidApp
 ./gradlew.bat testDebugUnitTest lintDebug assembleRelease
 ```
@@ -241,19 +245,29 @@ cd server
 go test -tags=integration -v ./internal/service
 ```
 
-它覆盖空库、v1→v2、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 17、Node→Go→Node 加密站点双向运行时验证、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
+它覆盖空库、v1→v2→v3→v4、checksum 漂移、PATCH `false`、签到幂等与失败重试、签到及公告取消后的终态写入、公告去重/排序和连接重开持久化。GitHub Actions 还覆盖 race、vet、lint、govulncheck、Playwright 桌面/Pixel 7、Android API 26/35/36、Release/R8、PostgreSQL 18.4、128 MiB 下的数据库/静态资源压力、SIGTERM 退出码、依赖与 secret 扫描、PostgreSQL runtime 扫描，以及同一最终归档逐架构扫描并带 SBOM/provenance/digest/checksum 证据的 amd64/arm64 Go OCI 构建。CI 未实际运行前不能视为这些门禁已通过。
 
 ## 目录
 
 ```text
 server/             Go 后端、Ent schema/生成代码与嵌入式 Web 产物
 web/                Vue 3 管理页
+companion-extension/ 可选 Chrome 浏览器伴侣
 androidApp/         Kotlin + Compose + Miuix Android 客户端
-src/                保留的 Node 兼容实现
-tests/              Node 测试与跨语言兼容 fixture
 docs/               产品边界、API 契约和 PostgreSQL 说明
 .github/workflows/  全栈、真实 PostgreSQL、Android 与 OCI 门禁
-docker-compose.go.yml  显式 Go candidate 容器 override
+Dockerfile          Go + Vue 多阶段生产镜像
+docker-compose.yml  Go 服务与 PostgreSQL 18.4
 ```
 
-更完整的产品边界与接口定义见 `docs/product-brief.md` 和 `docs/api-contract.md`；参考项目功能取舍与许可证边界见 `docs/reference-analysis.md`。
+更完整的产品边界与接口定义见 `docs/product-brief.md` 和 `docs/api-contract.md`。
+
+## 参考项目
+
+- [qixing-jk/all-api-hub](https://github.com/qixing-jk/all-api-hub)（AGPL-3.0）
+- [cita-777/metapi](https://github.com/cita-777/metapi/tree/41767a65ec8e5470a9a70f4615b47dc24949afff)（MIT）
+- [aceHubert/newapi-ai-check-in](https://github.com/aceHubert/newapi-ai-check-in/tree/082e18b8abd875f813302cb63d73edec6e9c49fa)（BSD-2-Clause）
+- [Jasonliu-0/Newapi-checkin](https://github.com/Jasonliu-0/Newapi-checkin/tree/9ab62be42f38783da7767a2b1b810c33561d6d0e)（MIT）
+- [ken861222/newapi-manager](https://github.com/ken861222/newapi-manager/tree/43e2fb0027a2f13cd74ace8eeed2275c1572a127)（README 声明 MIT）
+
+APIHub 仅参考这些项目的公开功能与协议边界，没有复制其源码。具体功能取舍、许可证边界和核对版本见 `docs/reference-analysis.md`。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-type IconName = 'activity' | 'announcements' | 'checkins' | 'dashboard' | 'logout' | 'plus' | 'sites';
+type IconName = 'activity' | 'announcements' | 'checkins' | 'dashboard' | 'logout' | 'plus' | 'sites' | 'upload';
 
 withDefaults(defineProps<{ name: IconName; size?: number }>(), { size: 18 });
 
@@ -11,6 +11,7 @@ const paths: Record<IconName, string[]> = {
   logout: ['M10 17l5-5-5-5', 'M15 12H3', 'M15 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4'],
   plus: ['M12 5v14', 'M5 12h14'],
   sites: ['M4 4h16v6H4z', 'M4 14h16v6H4z', 'M8 7h.01', 'M8 17h.01'],
+  upload: ['M12 16V4', 'M7 9l5-5 5 5', 'M5 20h14'],
 };
 </script>
 

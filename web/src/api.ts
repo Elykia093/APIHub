@@ -1,5 +1,5 @@
 import { clearSession, sessionToken } from './session';
-import type { AdapterDescriptor, Announcement, AnnouncementSync, APIErrorBody, CheckinRun, Site, SiteWrite, Summary } from './types';
+import type { AdapterDescriptor, Announcement, AnnouncementSync, APIErrorBody, BrowserTask, CheckinRun, CompanionDevice, Site, SiteImportResult, SiteWrite, Summary } from './types';
 
 export class APIError extends Error {
   constructor(readonly status: number, readonly code: string, message: string, readonly retryable: boolean, readonly requestId: string) { super(message); this.name = 'APIError'; }
@@ -45,9 +45,15 @@ export const api = {
   site: async (id: string, signal?: AbortSignal) => (await request<{ data: Site }>(`/api/v1/sites/${id}`, withSignal(signal))).data,
   createSite: async (input: SiteWrite) => (await request<{ data: Site }>('/api/v1/sites', { method: 'POST', body: JSON.stringify(input) })).data,
   updateSite: async (id: string, input: Partial<SiteWrite>) => (await request<{ data: Site }>(`/api/v1/sites/${id}`, { method: 'PATCH', body: JSON.stringify(input) })).data,
+  importSites: async (backup: unknown, dryRun: boolean, signal?: AbortSignal) => (await request<{ data: SiteImportResult }>('/api/v1/site-imports', { method: 'POST', body: JSON.stringify({ source: 'all-api-hub', dryRun, backup }), ...withSignal(signal) })).data,
   checkins: async (signal?: AbortSignal) => (await request<{ data: CheckinRun[] }>('/api/v1/checkin-runs?limit=100', withSignal(signal))).data,
   runCheckin: async (siteId: string) => (await request<{ data: CheckinRun }>(`/api/v1/sites/${siteId}/checkin-runs`, { method: 'POST' })).data,
   announcements: async (signal?: AbortSignal) => (await request<{ data: Announcement[] }>('/api/v1/announcements?limit=100', withSignal(signal))).data,
   syncAnnouncements: async (siteId: string) => (await request<{ data: AnnouncementSync }>(`/api/v1/sites/${siteId}/announcement-syncs`, { method: 'POST' })).data,
   setAnnouncementRead: async (id: string, read: boolean) => (await request<{ data: Announcement }>(`/api/v1/announcements/${id}`, { method: 'PATCH', body: JSON.stringify({ read }) })).data,
+  createPairingCode: async () => (await request<{ data: { code: string; expiresAt: string } }>('/api/v1/companion-pairing-codes', { method: 'POST', body: '{}' })).data,
+  companionDevices: async () => (await request<{ data: CompanionDevice[] }>('/api/v1/companion-devices')).data,
+  revokeCompanionDevice: async (id: string) => (await request<{ data: { id: string; revoked: boolean } }>(`/api/v1/companion-devices/${id}/revocations`, { method: 'POST', body: '{}' })).data,
+  browserTasks: async () => (await request<{ data: BrowserTask[] }>('/api/v1/browser-tasks?limit=100')).data,
+  createBrowserTask: async (siteId: string, targetUrl: string) => (await request<{ data: BrowserTask }>(`/api/v1/sites/${siteId}/browser-tasks`, { method: 'POST', body: JSON.stringify({ targetUrl }) })).data,
 };

@@ -106,6 +106,24 @@ func TestUnauthorizedRequestsDoNotConsumeGlobalRateLimit(t *testing.T) {
 	}
 }
 
+func TestCompanionRequestsUseGlobalRateLimitAndNoStore(t *testing.T) {
+	router := testRouter(t)
+	for attempt := 1; attempt <= 241; attempt++ {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/v1/companion/tasks/claims", nil))
+		if got := response.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("attempt %d Cache-Control = %q, want no-store", attempt, got)
+		}
+		want := http.StatusUnauthorized
+		if attempt == 241 {
+			want = http.StatusTooManyRequests
+		}
+		if response.Code != want {
+			t.Fatalf("attempt %d status = %d, want %d; body=%s", attempt, response.Code, want, response.Body.String())
+		}
+	}
+}
+
 func TestCreateRejectsExplicitEmptyDefaultedFields(t *testing.T) {
 	router := testRouter(t)
 	base := map[string]any{
@@ -248,6 +266,7 @@ func TestDedicatedRateLimitsDoNotConsumeGlobalBudget(t *testing.T) {
 	}{
 		{"/api/v1/sites/11111111-1111-1111-8111-111111111111/checkin-runs", "10"},
 		{"/api/v1/sites/11111111-1111-1111-8111-111111111111/announcement-syncs", "20"},
+		{"/api/v1/site-imports", "5"},
 	} {
 		t.Run(test.limit, func(t *testing.T) {
 			router := testRouter(t)
@@ -265,6 +284,44 @@ func TestDedicatedRateLimitsDoNotConsumeGlobalBudget(t *testing.T) {
 				t.Fatalf("global remaining = %q, want 239", got)
 			}
 		})
+	}
+}
+
+func TestSiteImportEnvelopeAndBodyLimit(t *testing.T) {
+	router := testRouter(t)
+	tests := []struct {
+		name, body string
+		status     int
+		code       string
+	}{
+		{"unknown source", `{"source":"other","dryRun":true,"backup":{}}`, 422, "VALIDATION_ERROR"},
+		{"missing dryRun", `{"source":"all-api-hub","backup":{}}`, 422, "VALIDATION_ERROR"},
+		{"unknown envelope field", `{"source":"all-api-hub","dryRun":true,"backup":{},"extra":true}`, 422, "VALIDATION_ERROR"},
+		{"null backup", `{"source":"all-api-hub","dryRun":true,"backup":null}`, 422, "VALIDATION_ERROR"},
+		{"over import limit", `{"source":"other","dryRun":true,"backup":{"padding":"` + strings.Repeat("x", siteImportBodyLimit) + `"}}`, 413, "PAYLOAD_TOO_LARGE"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodPost, "/api/v1/site-imports", strings.NewReader(test.body))
+			request.Header.Set("Authorization", "Bearer "+testAdminToken)
+			request.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.status || !strings.Contains(response.Body.String(), `"code":"`+test.code+`"`) {
+				t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+			}
+		})
+	}
+
+	router = testRouter(t)
+	underDefaultLimit := `{"source":"other","dryRun":true,"backup":{"padding":"` + strings.Repeat("x", defaultJSONBodyLimit) + `"}}`
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/site-imports", strings.NewReader(underDefaultLimit))
+	request.Header.Set("Authorization", "Bearer "+testAdminToken)
+	request.Header.Set("Content-Type", "application/json")
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	if response.Code != 422 || !strings.Contains(response.Body.String(), "source must be all-api-hub") {
+		t.Fatalf("larger-than-default import body status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
