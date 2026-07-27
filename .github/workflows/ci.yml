@@ -431,21 +431,6 @@ jobs:
           IMAGE_VERSION: ${{ steps.image-identity.outputs.version }}
         run: |
           set -euo pipefail
-          oci_graph_has() {
-            local layout="$1" descriptor_file="$2" filter="$3"
-            local child_digest child
-            if jq -e "$filter" "$descriptor_file" >/dev/null; then
-              return 0
-            fi
-            while IFS= read -r child_digest; do
-              [[ "$child_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-              child="$layout/blobs/sha256/${child_digest#sha256:}"
-              if [ -f "$child" ] && oci_graph_has "$layout" "$child" "$filter"; then
-                return 0
-              fi
-            done < <(jq -r '.manifests[]?.digest // empty' "$descriptor_file")
-            return 1
-          }
           archive="/tmp/apihub-go-${GITHUB_SHA}.tar"
           layout="/tmp/apihub-go-${GITHUB_SHA}.layout"
           test -n "$GO_DIGEST"
@@ -456,12 +441,15 @@ jobs:
           jq -e --arg digest "$GO_DIGEST" '."containerimage.digest" == $digest' "${archive%.tar}.metadata.json"
           mkdir -p "$layout"
           tar -xf "$archive" -C "$layout"
-          oci_graph_has "$layout" "$layout/index.json" '[.manifests[]? | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | .platform.architecture] | sort == ["amd64", "arm64"]'
-          oci_graph_has "$layout" "$layout/index.json" 'any(.manifests[]?; .annotations["vnd.docker.reference.type"] == "attestation-manifest")'
+          image_index="$layout/blobs/sha256/${GO_DIGEST#sha256:}"
+          jq -e --arg digest "$GO_DIGEST" 'any(.manifests[]?; .digest == $digest)' "$layout/index.json"
+          test -s "$image_index"
+          jq -e '[.manifests[]? | select(.platform.os == "linux" and (.platform.architecture == "amd64" or .platform.architecture == "arm64")) | .platform.architecture] | sort == ["amd64", "arm64"]' "$image_index"
+          jq -e 'any(.manifests[]?; .annotations["vnd.docker.reference.type"] == "attestation-manifest")' "$image_index"
           grep -R -a -q 'https://spdx.dev/Document' "$layout/blobs/sha256"
           grep -R -a -q 'https://slsa.dev/provenance/' "$layout/blobs/sha256"
           for architecture in amd64 arm64; do
-            manifest_digest="$(jq -r --arg architecture "$architecture" '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture and (.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest' "$layout/index.json" | head -n 1)"
+            manifest_digest="$(jq -r --arg architecture "$architecture" '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture and (.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest' "$image_index" | head -n 1)"
             [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
             manifest="$layout/blobs/sha256/${manifest_digest#sha256:}"
             config_digest="$(jq -r '.config.digest' "$manifest")"
