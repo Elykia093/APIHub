@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
   workflow_dispatch:
 
@@ -390,8 +391,23 @@ jobs:
     needs: [container]
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
       - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      - name: Resolve immutable image identity
+        id: image-identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+            git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="ci-${GITHUB_RUN_NUMBER}"
+          fi
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
       - name: Build Go OCI
         id: go-oci
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
@@ -405,13 +421,14 @@ jobs:
           sbom: true
           provenance: mode=max
           build-args: |
-            VERSION=ci-${{ github.run_number }}
+            VERSION=${{ steps.image-identity.outputs.version }}
             REVISION=${{ github.sha }}
       - name: Verify OCI indexes, attestations, digest and checksum
         shell: bash
         env:
           GO_DIGEST: ${{ steps.go-oci.outputs.digest }}
           GO_METADATA: ${{ steps.go-oci.outputs.metadata }}
+          IMAGE_VERSION: ${{ steps.image-identity.outputs.version }}
         run: |
           set -euo pipefail
           oci_graph_has() {
@@ -443,6 +460,15 @@ jobs:
           oci_graph_has "$layout" "$layout/index.json" 'any(.manifests[]?; .annotations["vnd.docker.reference.type"] == "attestation-manifest")'
           grep -R -a -q 'https://spdx.dev/Document' "$layout/blobs/sha256"
           grep -R -a -q 'https://slsa.dev/provenance/' "$layout/blobs/sha256"
+          for architecture in amd64 arm64; do
+            manifest_digest="$(jq -r --arg architecture "$architecture" '.manifests[]? | select(.platform.os == "linux" and .platform.architecture == $architecture and (.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest") | .digest' "$layout/index.json" | head -n 1)"
+            [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            manifest="$layout/blobs/sha256/${manifest_digest#sha256:}"
+            config_digest="$(jq -r '.config.digest' "$manifest")"
+            [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            config="$layout/blobs/sha256/${config_digest#sha256:}"
+            jq -e --arg version "$IMAGE_VERSION" --arg revision "$GITHUB_SHA" '.config.Labels["org.opencontainers.image.version"] == $version and .config.Labels["org.opencontainers.image.revision"] == $revision' "$config"
+          done
       - name: Scan final Go OCI for amd64
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         env:
@@ -489,5 +515,70 @@ jobs:
         with:
           name: apihub-go-oci-${{ github.sha }}-${{ github.run_attempt }}
           path: /tmp/apihub-go-${{ github.sha }}.*
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-image:
+    name: Publish verified OCI to GHCR
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [supply-chain]
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Download immutable Go OCI
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: apihub-go-oci-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/apihub-release
+      - name: Verify and publish immutable OCI
+        shell: bash
+        env:
+          EVIDENCE_DIR: /tmp/apihub-release
+          GHCR_IMAGE: ghcr.io/elykia093/apihub
+          GHCR_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          SHA_TAG: sha-${{ github.sha }}
+        run: |
+          set -euo pipefail
+          archive="${EVIDENCE_DIR}/apihub-go-${GITHUB_SHA}.tar"
+          digest_file="${archive%.tar}.digest"
+          metadata_file="${archive%.tar}.metadata.json"
+          checksum_file="${archive%.tar}.sha256"
+          test -s "$archive"
+          test -s "$digest_file"
+          test -s "$metadata_file"
+          test -s "$checksum_file"
+          (cd "$EVIDENCE_DIR" && sha256sum -c "$(basename "$checksum_file")")
+          expected_digest="$(tr -d '\r\n' <"$digest_file")"
+          [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -e --arg digest "$expected_digest" '."containerimage.digest" == $digest' "$metadata_file"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo
+          skopeo --version
+          printf '%s' "$GHCR_TOKEN" | skopeo login --username "$GITHUB_ACTOR" --password-stdin ghcr.io
+          trap 'skopeo logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          release_ref="docker://${GHCR_IMAGE}:${RELEASE_TAG}"
+          sha_ref="docker://${GHCR_IMAGE}:${SHA_TAG}"
+          skopeo copy --all --preserve-digests "oci-archive:${archive}" "$release_ref"
+          skopeo copy --all --preserve-digests "$release_ref" "$sha_ref"
+          for ref in "$release_ref" "$sha_ref"; do
+            actual_digest="sha256:$(skopeo inspect --raw "$ref" | sha256sum | awk '{print $1}')"
+            test "$actual_digest" = "$expected_digest"
+          done
+          jq -n \
+            --arg image "$GHCR_IMAGE" \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg shaTag "$SHA_TAG" \
+            --arg digest "$expected_digest" \
+            '{image: $image, releaseTag: $releaseTag, shaTag: $shaTag, digest: $digest}' \
+            >"${EVIDENCE_DIR}/apihub-go-${GITHUB_SHA}.registry.json"
+      - name: Upload GHCR publication evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apihub-go-registry-${{ github.sha }}-${{ github.run_attempt }}
+          path: /tmp/apihub-release/apihub-go-${{ github.sha }}.registry.json
           if-no-files-found: error
           retention-days: 30

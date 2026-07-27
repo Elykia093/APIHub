@@ -199,10 +199,13 @@ APIHub 采用[语义化版本 2.0.0（SemVer）](https://semver.org/lang/zh-CN/)
 
 Go 是唯一后端实现。发布前必须通过 Go、Vue、Android、PostgreSQL 18.4 集成、容器压力、SIGTERM、依赖扫描和双架构 OCI 门禁，并备份 PostgreSQL 与 `APP_SECRET`。
 
-生产部署必须使用已验证的不可变镜像 digest，而不是重新构建或使用可变 tag：
+向 `main` 上的发布提交推送 `vX.Y.Z` 或先行版本 tag 后，GitHub Actions 会在全部门禁通过后将同一份已扫描 OCI 制品发布到 `ghcr.io/elykia093/apihub`。发布镜像同时写入版本 tag 和 `sha-<commit>` tag；先行版本不会更新 `latest`。服务器只允许从 GHCR 拉取并按已验证 digest 部署，不得现场构建或重新打包。
+
+生产部署必须使用已验证的不可变镜像 digest，而不是仅依赖 tag：
 
 ```powershell
-$env:APIHUB_IMAGE = "registry.example/apihub-go@sha256:<verified-digest>"
+$env:APIHUB_IMAGE = "ghcr.io/elykia093/apihub@sha256:<verified-digest>"
+docker compose pull apihub
 docker compose up -d --no-build --force-recreate apihub
 ```
 
