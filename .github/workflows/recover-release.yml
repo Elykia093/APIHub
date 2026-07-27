@@ -1,0 +1,289 @@
+name: Recover v0.1.0-rc.3 GHCR publication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+  packages: write
+
+concurrency:
+  group: recover-v0.1.0-rc.3-ghcr
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: v0.1.0-rc.3
+  RELEASE_VERSION: 0.1.0-rc.3
+  SOURCE_SHA: eff86d7a1a393380c461bfb438be4d34062d5ded
+  SOURCE_RUN_ID: "30287415420"
+  SOURCE_RUN_ATTEMPT: "1"
+  SOURCE_ARTIFACT_ID: "8661559409"
+  SOURCE_ARTIFACT_NAME: apihub-go-oci-eff86d7a1a393380c461bfb438be4d34062d5ded-1
+  SOURCE_ARTIFACT_SIZE: "46756380"
+  SOURCE_ARTIFACT_DIGEST: sha256:674f45bb4ec1107cd4fab09ae17285ac7c2df4d6d35bd3499b882f029bcd7b83
+  GHCR_IMAGE: ghcr.io/elykia093/apihub
+
+jobs:
+  recover:
+    name: Publish previously verified OCI to GHCR
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out the signed release tag
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: refs/tags/v0.1.0-rc.3
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag, source run, jobs and artifact identity
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Elykia093/APIHub"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git cat-file -t "refs/tags/${RELEASE_TAG}")" = "tag"
+          test "$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")" = "$SOURCE_SHA"
+          git merge-base --is-ancestor "$SOURCE_SHA" origin/main
+
+          allowed_signers="$(mktemp)"
+          trap 'rm -f -- "$allowed_signers"' EXIT
+          printf '%s %s\n' \
+            'elykia@qq.com' \
+            'ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC+2gtsjOhShyqu877Gn0nW5B3IFPNm2KQP1P12EMJIze7oc6U0vKMe6Rqvvhn4n/qwLFv++o2BWUhYAsc7emO/psjpNSF7RrYfBqKBDq/j1UFo3zPB5QVtZX1Cw+E+9PKLLNnoNaEipU2iiJveW2SJmp03/2zHuj8QWslJHJoAACx0odBsQ3/62LRrGLFORUTcVnuwtepfDeHFQ5Frd/tRNFG+ASeCluTnmXbog21TxtjR8Jyp1GlG3I5Ue7lJ9vbpDpJ7Yfxz4TrZd+MfWDVRKWhgM22Q4DlicSqxtMenwqZ0lGwk0m9ykxjphjrqAnQxDWZnsUHCcMGWMhBtKEUqbrR5vf01Ij4GUuBB3/ehgYd0oBZ9fq/bBtZpAGk969SHTIiL2mYPEJMe86siWVNjQfwj0ljFym4O9VYluBcCmxEuLakQb9NifIowAiOXoawod3LMoyHQBpNSlL4Gm0tS7habwe1St8PPvOhPq+tyE6FrirpvfY+PnmVxi230szU=' \
+            >"$allowed_signers"
+          git \
+            -c gpg.format=ssh \
+            -c gpg.ssh.allowedSignersFile="$allowed_signers" \
+            verify-tag "refs/tags/${RELEASE_TAG}"
+
+          run_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}")"
+          jq -e \
+            --arg tag "$RELEASE_TAG" \
+            --arg sha "$SOURCE_SHA" \
+            --argjson attempt "$SOURCE_RUN_ATTEMPT" \
+            '.event == "push"
+              and .head_branch == $tag
+              and .head_sha == $sha
+              and .path == ".github/workflows/ci.yml"
+              and .run_attempt == $attempt
+              and .status == "completed"
+              and .conclusion == "failure"' \
+            <<<"$run_json"
+
+          jobs_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/jobs?per_page=100")"
+          jq -e '.total_count == 11 and (.jobs | length == 11)' <<<"$jobs_json"
+          required_jobs=(
+            'Go test, race, vet, lint and vulnerability scan'
+            'PostgreSQL 18.4 integration'
+            'Vue lint, test, build and E2E'
+            'Android unit, lint and release/R8'
+            'Android UI and Keystore (API 26)'
+            'Android UI and Keystore (API 35)'
+            'Browser companion syntax and policy'
+            'Android UI and Keystore (API 36)'
+            'Go container, PostgreSQL, hardening and smoke'
+            'Immutable multi-architecture Go OCI evidence'
+          )
+          for job_name in "${required_jobs[@]}"; do
+            jq -e \
+              --arg name "$job_name" \
+              '[.jobs[] | select(.name == $name and .status == "completed" and .conclusion == "success")] | length == 1' \
+              <<<"$jobs_json"
+          done
+          jq -e \
+            '[.jobs[] | select(.name == "Publish verified OCI to GHCR" and .status == "completed" and .conclusion == "failure")] | length == 1' \
+            <<<"$jobs_json"
+          jq -e \
+            '[.jobs[] | select(.name != "Publish verified OCI to GHCR" and .conclusion != "success")] | length == 0' \
+            <<<"$jobs_json"
+
+          artifact_json="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${SOURCE_ARTIFACT_ID}")"
+          jq -e \
+            --arg name "$SOURCE_ARTIFACT_NAME" \
+            --arg digest "$SOURCE_ARTIFACT_DIGEST" \
+            --arg sha "$SOURCE_SHA" \
+            --arg tag "$RELEASE_TAG" \
+            --argjson size "$SOURCE_ARTIFACT_SIZE" \
+            --argjson run_id "$SOURCE_RUN_ID" \
+            '.name == $name
+              and .digest == $digest
+              and .size_in_bytes == $size
+              and .expired == false
+              and .workflow_run.id == $run_id
+              and .workflow_run.head_branch == $tag
+              and .workflow_run.head_sha == $sha' \
+            <<<"$artifact_json"
+
+      - name: Download the original verified OCI artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: "8661559409"
+          path: /tmp/apihub-release
+          merge-multiple: true
+          github-token: ${{ github.token }}
+          repository: Elykia093/APIHub
+          run-id: "30287415420"
+
+      - name: Verify the downloaded OCI evidence
+        id: verify-oci
+        shell: bash
+        env:
+          EVIDENCE_DIR: /tmp/apihub-release
+        run: |
+          set -euo pipefail
+          archive="${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.tar"
+          digest_file="${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.digest"
+          metadata_file="${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.metadata.json"
+          checksum_file="${archive}.sha256"
+          layout="$(mktemp -d)"
+          trap 'rm -rf -- "$layout"' EXIT
+
+          test -s "$archive"
+          test -s "$digest_file"
+          test -s "$metadata_file"
+          test -s "$checksum_file"
+          (cd "$EVIDENCE_DIR" && sha256sum -c "$(basename "$checksum_file")")
+
+          expected_digest="$(tr -d '\r\n' <"$digest_file")"
+          [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          jq -e --arg digest "$expected_digest" \
+            '."containerimage.digest" == $digest' \
+            "$metadata_file"
+
+          tar -xf "$archive" -C "$layout"
+          image_index="$layout/blobs/sha256/${expected_digest#sha256:}"
+          jq -e --arg digest "$expected_digest" \
+            'any(.manifests[]?; .digest == $digest)' \
+            "$layout/index.json"
+          test -s "$image_index"
+          jq -e \
+            '[.manifests[]?
+              | select(.platform.os == "linux"
+                and (.platform.architecture == "amd64" or .platform.architecture == "arm64"))
+              | .platform.architecture]
+              | sort == ["amd64", "arm64"]' \
+            "$image_index"
+          jq -e \
+            'any(.manifests[]?; .annotations["vnd.docker.reference.type"] == "attestation-manifest")' \
+            "$image_index"
+          grep -R -a -q 'https://spdx.dev/Document' "$layout/blobs/sha256"
+          grep -R -a -q 'https://slsa.dev/provenance/' "$layout/blobs/sha256"
+
+          for architecture in amd64 arm64; do
+            manifest_digest="$(jq -r \
+              --arg architecture "$architecture" \
+              '.manifests[]?
+                | select(.platform.os == "linux"
+                  and .platform.architecture == $architecture
+                  and (.annotations["vnd.docker.reference.type"] // "") != "attestation-manifest")
+                | .digest' \
+              "$image_index" | head -n 1)"
+            [[ "$manifest_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            manifest="$layout/blobs/sha256/${manifest_digest#sha256:}"
+            config_digest="$(jq -r '.config.digest' "$manifest")"
+            [[ "$config_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            config="$layout/blobs/sha256/${config_digest#sha256:}"
+            jq -e \
+              --arg version "$RELEASE_VERSION" \
+              --arg revision "$SOURCE_SHA" \
+              '.config.Labels["org.opencontainers.image.version"] == $version
+                and .config.Labels["org.opencontainers.image.revision"] == $revision' \
+              "$config"
+          done
+
+          for report in "${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.trivy."{amd64,arm64}".json"; do
+            test -s "$report"
+            jq -e \
+              '([.Results[]?.Vulnerabilities[]?] + [.Results[]?.Secrets[]?]) | length == 0' \
+              "$report"
+          done
+          printf 'digest=%s\n' "$expected_digest" >>"$GITHUB_OUTPUT"
+
+      - name: Publish the same OCI bytes to GHCR
+        shell: bash
+        env:
+          EVIDENCE_DIR: /tmp/apihub-release
+          EXPECTED_DIGEST: ${{ steps.verify-oci.outputs.digest }}
+          GHCR_TOKEN: ${{ github.token }}
+          SHA_TAG: sha-eff86d7a1a393380c461bfb438be4d34062d5ded
+        run: |
+          set -euo pipefail
+          archive="${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.tar"
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y skopeo
+          skopeo --version
+          printf '%s' "$GHCR_TOKEN" | skopeo login \
+            --username "$GITHUB_ACTOR" \
+            --password-stdin \
+            ghcr.io
+          trap 'skopeo logout ghcr.io >/dev/null 2>&1 || true' EXIT
+
+          release_ref="docker://${GHCR_IMAGE}:${RELEASE_TAG}"
+          sha_ref="docker://${GHCR_IMAGE}:${SHA_TAG}"
+          source_ref="oci-archive:${archive}"
+          refs=("$sha_ref" "$release_ref")
+          missing_refs=()
+
+          for ref in "${refs[@]}"; do
+            existing_raw="$(mktemp)"
+            inspect_error="$(mktemp)"
+            if skopeo inspect --raw "$ref" >"$existing_raw" 2>"$inspect_error"; then
+              existing_digest="sha256:$(sha256sum "$existing_raw" | awk '{print $1}')"
+              test "$existing_digest" = "$EXPECTED_DIGEST"
+            elif grep -Eqi 'manifest unknown|name unknown' "$inspect_error"; then
+              missing_refs+=("$ref")
+            else
+              sed 's/[[:cntrl:]]//g' "$inspect_error" >&2
+              exit 1
+            fi
+            rm -f -- "$existing_raw" "$inspect_error"
+          done
+
+          for ref in "${missing_refs[@]}"; do
+            skopeo copy --all --preserve-digests "$source_ref" "$ref"
+          done
+
+          for ref in "${refs[@]}"; do
+            registry_raw="$(mktemp)"
+            skopeo inspect --raw "$ref" >"$registry_raw"
+            actual_digest="sha256:$(sha256sum "$registry_raw" | awk '{print $1}')"
+            rm -f -- "$registry_raw"
+            test "$actual_digest" = "$EXPECTED_DIGEST"
+          done
+
+          jq -n \
+            --arg image "$GHCR_IMAGE" \
+            --arg releaseTag "$RELEASE_TAG" \
+            --arg shaTag "$SHA_TAG" \
+            --arg digest "$EXPECTED_DIGEST" \
+            --arg sourceCommit "$SOURCE_SHA" \
+            --arg sourceRun "$SOURCE_RUN_ID" \
+            --arg sourceRunAttempt "$SOURCE_RUN_ATTEMPT" \
+            --arg sourceArtifactId "$SOURCE_ARTIFACT_ID" \
+            --arg sourceArtifactDigest "$SOURCE_ARTIFACT_DIGEST" \
+            --arg recoveryRun "$GITHUB_RUN_ID" \
+            '{
+              image: $image,
+              releaseTag: $releaseTag,
+              shaTag: $shaTag,
+              digest: $digest,
+              sourceCommit: $sourceCommit,
+              sourceRun: $sourceRun,
+              sourceRunAttempt: $sourceRunAttempt,
+              sourceArtifactId: $sourceArtifactId,
+              sourceArtifactDigest: $sourceArtifactDigest,
+              recoveryRun: $recoveryRun
+            }' \
+            >"${EVIDENCE_DIR}/apihub-go-${SOURCE_SHA}.registry.json"
+
+      - name: Upload GHCR recovery evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: apihub-go-registry-recovery-${{ env.SOURCE_SHA }}-${{ github.run_attempt }}
+          path: /tmp/apihub-release/apihub-go-${{ env.SOURCE_SHA }}.registry.json
+          if-no-files-found: error
+          retention-days: 30

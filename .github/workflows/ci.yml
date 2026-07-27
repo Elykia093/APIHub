@@ -534,7 +534,7 @@ jobs:
           archive="${EVIDENCE_DIR}/apihub-go-${GITHUB_SHA}.tar"
           digest_file="${archive%.tar}.digest"
           metadata_file="${archive%.tar}.metadata.json"
-          checksum_file="${archive%.tar}.sha256"
+          checksum_file="${archive}.sha256"
           test -s "$archive"
           test -s "$digest_file"
           test -s "$metadata_file"
