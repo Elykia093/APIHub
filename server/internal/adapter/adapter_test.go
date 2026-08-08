@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/elykia/apihub/server/internal/apperror"
 	"github.com/elykia/apihub/server/internal/domain"
 	"github.com/elykia/apihub/server/internal/netclient"
 )
@@ -83,6 +85,105 @@ func TestNewAPIStatusTransportErrorStopsCheckin(t *testing.T) {
 	}
 	if got := requests.Load(); got != 1 {
 		t.Fatalf("requests = %d, want 1", got)
+	}
+}
+
+func TestNewAPIAnnouncementSourceDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/status":
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(t, w, map[string]any{"message": "secret-status-body"})
+		case "/api/notice":
+			w.WriteHeader(http.StatusNotFound)
+			writeJSON(t, w, map[string]any{"message": "secret-notice-body"})
+		}
+	}))
+	defer server.Close()
+	client := localClient()
+	defer client.Close()
+
+	_, err := NewNewAPI(client).FetchAnnouncements(context.Background(), domain.SiteContext{BaseURL: server.URL})
+	if err == nil {
+		t.Fatal("FetchAnnouncements() succeeded when both sources failed")
+	}
+	if code := apperror.As(err).Code; code != apperror.UpstreamRejected {
+		t.Fatalf("error code = %s, want %s", code, apperror.UpstreamRejected)
+	}
+	message := err.Error()
+	for _, expected := range []string{"status=HTTP_403", "notice=HTTP_404"} {
+		if !strings.Contains(message, expected) {
+			t.Fatalf("error message %q does not contain %q", message, expected)
+		}
+	}
+	for _, forbidden := range []string{"secret-status-body", "secret-notice-body", server.URL} {
+		if strings.Contains(message, forbidden) {
+			t.Fatalf("error message contains sensitive detail %q: %q", forbidden, message)
+		}
+	}
+}
+
+func TestNewAPIPartialAnnouncementDiagnostics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/api/status" {
+			writeJSON(t, w, map[string]any{"success": true, "data": map[string]any{"announcements": []any{map[string]any{"content": "Maintenance"}}}})
+			return
+		}
+		w.WriteHeader(http.StatusBadGateway)
+		writeJSON(t, w, map[string]any{"message": "upstream detail"})
+	}))
+	defer server.Close()
+	client := localClient()
+	defer client.Close()
+
+	result, err := NewNewAPI(client).FetchAnnouncements(context.Background(), domain.SiteContext{BaseURL: server.URL})
+	if err != nil || len(result.Items) != 1 || len(result.Warnings) != 1 || result.Warnings[0] != "notice=HTTP_502" {
+		t.Fatalf("partial result = %+v, err=%v", result, err)
+	}
+}
+
+func TestNewAPIAnnouncementTransportDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			connection, _, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Errorf("hijack status connection: %v", err)
+				return
+			}
+			_ = connection.Close()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(t, w, map[string]any{"success": true, "data": "notice"})
+	}))
+	defer server.Close()
+	client := localClient()
+	defer client.Close()
+
+	result, err := NewNewAPI(client).FetchAnnouncements(context.Background(), domain.SiteContext{BaseURL: server.URL})
+	if err != nil || len(result.Items) != 1 || len(result.Warnings) != 1 || result.Warnings[0] != "status=UPSTREAM_REJECTED" {
+		t.Fatalf("transport result = %+v, err=%v", result, err)
+	}
+}
+
+func TestNewAPIAnnouncementTimeoutDiagnostic(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			<-r.Context().Done()
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(t, w, map[string]any{"success": true, "data": "notice"})
+	}))
+	defer server.Close()
+	client := netclient.New(netclient.Options{Timeout: 50 * time.Millisecond, MaxResponseBytes: 64 * 1024, AllowPrivateSites: true, AllowInsecureHTTP: true})
+	defer client.Close()
+
+	result, err := NewNewAPI(client).FetchAnnouncements(context.Background(), domain.SiteContext{BaseURL: server.URL})
+	if err != nil || len(result.Items) != 1 || len(result.Warnings) != 1 || result.Warnings[0] != "status=UPSTREAM_TIMEOUT" {
+		t.Fatalf("timeout result = %+v, err=%v", result, err)
 	}
 }
 

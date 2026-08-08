@@ -137,6 +137,14 @@ jobs:
         with:
           packages: platform-tools platforms;android-37.0 build-tools;36.0.0
       - uses: gradle/actions/setup-gradle@017a9effdb900e5b5b2fddfb590a105619dca3c3 # v4.4.2
+      - name: Verify release tag matches Android version
+        if: github.ref_type == 'tag'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version_name="$(sed -nE 's/^[[:space:]]*versionName = "([^"]+)"[[:space:]]*$/\1/p' app/build.gradle.kts)"
+          test -n "$version_name"
+          test "v${version_name}" = "$GITHUB_REF_NAME"
       - run: ./gradlew testDebugUnitTest lintDebug assembleRelease --stacktrace
       - name: Upload release APK
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
