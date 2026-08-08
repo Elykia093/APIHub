@@ -51,15 +51,14 @@ func (s *CheckinService) Run(ctx context.Context, siteID, requestID string, now 
 	if err == nil && terminalStatus(string(existing.Status)) {
 		return checkinView(existing, site.Name), nil
 	}
-	if err == nil && existing.Status == checkinrun.StatusRunning {
-		return CheckinView{}, apperror.New(409, apperror.Conflict, "A check-in is already running for this site", true)
-	}
 	if err != nil && !ent.IsNotFound(err) {
 		return CheckinView{}, fmt.Errorf("find daily check-in: %w", err)
 	}
 	var run *ent.CheckinRun
 	if existing != nil {
-		run, err = existing.Update().Where(checkinrun.StatusIn(checkinrun.StatusFailed, checkinrun.StatusSkipped)).SetStatus(checkinrun.StatusRunning).ClearRewardValue().SetMessage("").ClearErrorCode().AddAttemptCount(1).SetStartedAt(time.Now().UTC()).ClearFinishedAt().SetRequestID(requestID).Save(ctx)
+		// Once this process owns the site lock, a persisted running row can only
+		// be an interrupted attempt under the supported single-replica topology.
+		run, err = existing.Update().Where(checkinrun.StatusIn(checkinrun.StatusFailed, checkinrun.StatusSkipped, checkinrun.StatusRunning)).SetStatus(checkinrun.StatusRunning).ClearRewardValue().SetMessage("").ClearErrorCode().AddAttemptCount(1).SetStartedAt(time.Now().UTC()).ClearFinishedAt().SetRequestID(requestID).Save(ctx)
 		if ent.IsNotFound(err) {
 			return CheckinView{}, apperror.New(409, apperror.Conflict, "A check-in is already running for this site", true)
 		}
@@ -88,7 +87,7 @@ func (s *CheckinService) Run(ctx context.Context, siteID, requestID string, now 
 	if err != nil {
 		return s.finishFailure(ctx, run, site, requestID, err)
 	}
-	update := run.Update().Where(checkinrun.StatusEQ(checkinrun.StatusRunning)).SetStatus(checkinrun.Status(result.Status)).SetMessage(result.Message).SetFinishedAt(time.Now().UTC()).ClearErrorCode()
+	update := run.Update().Where(checkinrun.StatusEQ(checkinrun.StatusRunning)).SetStatus(checkinrun.Status(result.Status)).SetMessage(result.Message).SetFinishedAt(time.Now().UTC())
 	if result.RewardValue != nil {
 		update.SetRewardValue(*result.RewardValue)
 	} else {
@@ -96,6 +95,8 @@ func (s *CheckinService) Run(ctx context.Context, siteID, requestID string, now 
 	}
 	if result.Status == "manual_required" {
 		update.SetErrorCode(apperror.ManualActionRequired)
+	} else {
+		update.ClearErrorCode()
 	}
 	finalizeCtx, cancel := terminalContext(ctx)
 	defer cancel()

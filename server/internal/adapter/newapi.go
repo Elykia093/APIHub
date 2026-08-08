@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"strings"
 
 	"github.com/elykia/apihub/server/internal/apperror"
 	"github.com/elykia/apihub/server/internal/domain"
@@ -111,6 +112,7 @@ func (a *NewAPIAdapter) FetchAnnouncements(ctx context.Context, site domain.Site
 	}()
 	status, notice := <-statusChannel, <-noticeChannel
 	output := domain.AnnouncementResult{}
+	warnings := make([]string, 0, 2)
 	if status.err == nil && status.response.OK {
 		payload, _ := record(status.response.JSON)
 		data, _ := record(payload["data"])
@@ -143,10 +145,10 @@ func (a *NewAPIAdapter) FetchAnnouncements(ctx context.Context, site domain.Site
 				}
 			}
 		} else {
-			output.Warnings = append(output.Warnings, "Structured announcements could not be fetched")
+			warnings = append(warnings, "status="+announcementFailureCode(nil, status.response))
 		}
 	} else {
-		output.Warnings = append(output.Warnings, "Structured announcements could not be fetched")
+		warnings = append(warnings, "status="+announcementFailureCode(status.err, status.response))
 	}
 	if notice.err == nil && notice.response.OK {
 		payload, _ := record(notice.response.JSON)
@@ -155,13 +157,24 @@ func (a *NewAPIAdapter) FetchAnnouncements(ctx context.Context, site domain.Site
 				output.Items = append(output.Items, domain.AnnouncementItem{Source: "notice", Content: content, Kind: "default"})
 			}
 		} else {
-			output.Warnings = append(output.Warnings, "Text notice could not be fetched")
+			warnings = append(warnings, "notice="+announcementFailureCode(nil, notice.response))
 		}
 	} else {
-		output.Warnings = append(output.Warnings, "Text notice could not be fetched")
+		warnings = append(warnings, "notice="+announcementFailureCode(notice.err, notice.response))
 	}
-	if len(output.Warnings) == 2 {
-		return domain.AnnouncementResult{}, apperror.New(502, apperror.UpstreamRejected, "All announcement sources failed", true)
+	output.Warnings = warnings
+	if len(warnings) == 2 {
+		return domain.AnnouncementResult{}, apperror.New(502, apperror.UpstreamRejected, "All announcement sources failed: "+strings.Join(warnings, "; "), true)
 	}
 	return output, nil
+}
+
+func announcementFailureCode(err error, response netclient.Response) string {
+	if err != nil {
+		return apperror.As(err).Code
+	}
+	if response.Status != 0 && !response.OK {
+		return fmt.Sprintf("HTTP_%d", response.Status)
+	}
+	return apperror.UpstreamRejected
 }

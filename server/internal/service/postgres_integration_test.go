@@ -511,9 +511,15 @@ func TestPostgresServiceCompatibility(t *testing.T) {
 	if err != nil || first.Status != "failed" || first.AttemptCount != 1 {
 		t.Fatalf("first check-in = %+v, err=%v", first, err)
 	}
+	if first.ErrorCode == nil || *first.ErrorCode != apperror.UpstreamRejected {
+		t.Fatalf("first check-in error code = %v, want %s", first.ErrorCode, apperror.UpstreamRejected)
+	}
 	second, err := checkins.Run(context.Background(), created.ID, "request-2", now)
 	if err != nil || second.Status != "success" || second.AttemptCount != 2 {
 		t.Fatalf("retry check-in = %+v, err=%v", second, err)
+	}
+	if second.ErrorCode != nil {
+		t.Fatalf("successful retry error code = %v, want nil", second.ErrorCode)
 	}
 	third, err := checkins.Run(context.Background(), created.ID, "request-3", now)
 	if err != nil || third.ID != second.ID || fake.checkinCalls != 2 {
@@ -550,6 +556,29 @@ func TestPostgresServiceCompatibility(t *testing.T) {
 	var canceledStatus string
 	if err := db.QueryRow("SELECT status FROM checkin_runs WHERE site_id = $1 AND local_date = $2", created.ID, now.AddDate(0, 0, 1).Format("2006-01-02")).Scan(&canceledStatus); err != nil || canceledStatus != "failed" {
 		t.Fatalf("persisted canceled status = %q, err=%v", canceledStatus, err)
+	}
+
+	fake.mu.Lock()
+	fake.manualNextCheckin = true
+	fake.mu.Unlock()
+	manual, err := checkins.Run(context.Background(), created.ID, "request-manual", now.AddDate(0, 0, 2))
+	if err != nil || manual.Status != "manual_required" || manual.ErrorCode == nil || *manual.ErrorCode != apperror.ManualActionRequired || manual.FinishedAt == nil {
+		t.Fatalf("manual check-in = %+v, err=%v", manual, err)
+	}
+	manualCalls := fake.checkinCalls
+	manualRetry, err := checkins.Run(context.Background(), created.ID, "request-manual-retry", now.AddDate(0, 0, 2))
+	if err != nil || manualRetry.ID != manual.ID || fake.checkinCalls != manualCalls {
+		t.Fatalf("manual check-in idempotency = %+v, calls=%d, want %d, err=%v", manualRetry, fake.checkinCalls, manualCalls, err)
+	}
+
+	staleDate := now.AddDate(0, 0, 3)
+	staleID := uuid.NewString()
+	if _, err := db.Exec(`INSERT INTO checkin_runs(id, site_id, local_date, status, message, attempt_count, started_at, request_id) VALUES($1, $2, $3, 'running', '', 1, $4, 'stale-request')`, staleID, created.ID, staleDate.Format("2006-01-02"), now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	stale, err := checkins.Run(context.Background(), created.ID, "request-stale-retry", staleDate)
+	if err != nil || stale.ID != staleID || stale.Status != "success" || stale.AttemptCount != 2 {
+		t.Fatalf("stale check-in recovery = %+v, err=%v", stale, err)
 	}
 
 	firstSync, err := announcements.Sync(context.Background(), created.ID, "sync-1")
@@ -628,6 +657,7 @@ type integrationAdapter struct {
 	mu                     sync.Mutex
 	checkinCalls           int
 	failFirstCheckin       bool
+	manualNextCheckin      bool
 	cancelNextCheckin      chan struct{}
 	cancelNextAnnouncement chan struct{}
 }
@@ -648,6 +678,8 @@ func (a *integrationAdapter) CheckIn(ctx context.Context, _ domain.SiteContext, 
 	cancelSignal := a.cancelNextCheckin
 	a.cancelNextCheckin = nil
 	fail := a.failFirstCheckin && a.checkinCalls == 1
+	manual := a.manualNextCheckin
+	a.manualNextCheckin = false
 	a.mu.Unlock()
 	if cancelSignal != nil {
 		close(cancelSignal)
@@ -656,6 +688,9 @@ func (a *integrationAdapter) CheckIn(ctx context.Context, _ domain.SiteContext, 
 	}
 	if fail {
 		return domain.CheckinResult{}, apperror.New(502, apperror.UpstreamRejected, "temporary upstream failure", true)
+	}
+	if manual {
+		return domain.CheckinResult{Status: "manual_required", Message: "complete verification"}, nil
 	}
 	return domain.CheckinResult{Status: "success", Message: "checked"}, nil
 }
