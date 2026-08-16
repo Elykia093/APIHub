@@ -45,6 +45,11 @@ vulnerabilities:
       - "pkg:golang/stdlib@v1.24.6"
     expired_at: 2026-08-18
     statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; crypto/tls is unreachable."
+  - id: CVE-2026-33818
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; ASN.1 parsing is unreachable."
   - id: CVE-2026-33811
     purls:
       - "pkg:golang/stdlib@v1.24.6"
@@ -60,6 +65,11 @@ vulnerabilities:
       - "pkg:golang/stdlib@v1.24.6"
     expired_at: 2026-08-18
     statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; net/mail is unreachable."
+  - id: CVE-2026-39821
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; IDNA and hostname privilege checks are unreachable."
   - id: CVE-2026-39822
     purls:
       - "pkg:golang/stdlib@v1.24.6"
@@ -80,3 +90,28 @@ vulnerabilities:
       - "pkg:golang/stdlib@v1.24.6"
     expired_at: 2026-08-18
     statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; MIME parsing is unreachable."
+  - id: CVE-2026-56853
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; HTTP/2 serving is unreachable."
+  - id: CVE-2026-56858
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; HTML template rendering is unreachable."
+  - id: CVE-2026-56859
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; XML decoding is unreachable."
+  - id: CVE-2026-56860
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; URL path resolution is unreachable."
+  - id: CVE-2026-56862
+    purls:
+      - "pkg:golang/stdlib@v1.24.6"
+    expired_at: 2026-08-18
+    statement: "Official postgres:18.4-alpine gosu 1.19 only performs local UID/GID switching and exec; TLS handshakes are unreachable."

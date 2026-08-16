@@ -426,7 +426,20 @@ func TestHelmetCompatibleSecurityAndRateLimitHeaders(t *testing.T) {
 			t.Errorf("%s = %q, want %q", name, got, value)
 		}
 	}
-	if csp := response.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src-attr 'none'") || !strings.Contains(csp, "form-action 'self'") {
+	if csp := response.Header().Get("Content-Security-Policy"); !strings.Contains(csp, "script-src-attr 'none'") || !strings.Contains(csp, "form-action 'self'") || strings.Contains(csp, "upgrade-insecure-requests") {
 		t.Errorf("Content-Security-Policy = %q", csp)
+	}
+}
+
+func TestHTTPWebAssetsDoNotUpgradeInsecureRequests(t *testing.T) {
+	router := testRouter(t)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/assets/app.js", nil))
+
+	if response.Code != http.StatusOK || response.Body.String() != "console.log('ok')" {
+		t.Fatalf("asset response = %d %q", response.Code, response.Body.String())
+	}
+	if csp := response.Header().Get("Content-Security-Policy"); strings.Contains(csp, "upgrade-insecure-requests") {
+		t.Fatalf("HTTP asset CSP unexpectedly upgrades requests: %q", csp)
 	}
 }

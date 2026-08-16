@@ -748,8 +748,9 @@ func (h *handler) recovery() gin.HandlerFunc {
 }
 func securityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// The supported HTTP deployment must load relative web assets without a TLS upgrade.
 		headers := map[string]string{
-			"Content-Security-Policy":           "default-src 'self'; base-uri 'self'; font-src 'self' https: data:; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; upgrade-insecure-requests; connect-src 'self'",
+			"Content-Security-Policy":           "default-src 'self'; base-uri 'self'; font-src 'self' https: data:; form-action 'self'; frame-ancestors 'none'; img-src 'self' data:; object-src 'none'; script-src 'self'; script-src-attr 'none'; style-src 'self'; connect-src 'self'",
 			"Cross-Origin-Opener-Policy":        "same-origin",
 			"Cross-Origin-Resource-Policy":      "same-origin",
 			"Origin-Agent-Cluster":              "?1",

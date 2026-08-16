@@ -17,7 +17,7 @@
 
 ## 架构
 
-- `server/`：Go 1.26.5、Gin、Ent、pgx，唯一验证目标为 PostgreSQL 18.4 Alpine；较低版本不作为兼容目标。启动只执行项目自己的 v1/v2/v3/v4 前向迁移，不启用 Ent 自动建表。
+- `server/`：Go 1.26.6、Gin、Ent、pgx，唯一验证目标为 PostgreSQL 18.4 Alpine；较低版本不作为兼容目标。启动只执行项目自己的 v1/v2/v3/v4 前向迁移，不启用 Ent 自动建表。
 - `web/`：Vue 3、Vite、TypeScript；生产产物通过 `go:embed` 编入同一个 Go 二进制。
 - `androidApp/`：Kotlin 2.4.0、Compose Multiplatform 1.11.1、Miuix 0.9.3；Miuix 0.9.3 AAR metadata 声明 `minCompileSdk=37`，因此为保证可构建性使用 `compileSdk 37`，应用仍保持 `minSdk 26`、`targetSdk 36`。这不是按原计划完全采用 `compileSdk 36`。
 - Go 是唯一后端实现，Vue 构建仍使用 Node.js 24 工具链，但仓库不再包含 Node 后端或 Node rollback 镜像。
@@ -64,7 +64,7 @@ docker compose logs -f apihub
 
 ## 本地开发
 
-后端需要 Go 1.26.5，Web 需要 Node.js 24，数据库以 PostgreSQL 18.4 为唯一验证目标。可先只启动 Compose 中的数据库：
+后端需要 Go 1.26.6，Web 需要 Node.js 24，数据库以 PostgreSQL 18.4 为唯一验证目标。可先只启动 Compose 中的数据库：
 
 ```powershell
 Copy-Item .env.example .env
